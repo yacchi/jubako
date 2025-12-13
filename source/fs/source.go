@@ -1,0 +1,259 @@
+// Package fs provides a file system based configuration source.
+package fs
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/yacchi/jubako/source"
+)
+
+// Default permission modes.
+const (
+	DefaultFileMode = 0644
+	DefaultDirMode  = 0755
+)
+
+// Source loads and saves raw configuration data from/to a file.
+type Source struct {
+	path         string
+	searchPaths  []string
+	resolvedPath string // cached path after resolution
+	fileMode     os.FileMode
+	dirMode      os.FileMode
+}
+
+// Ensure Source implements the source.Source interface.
+var _ source.Source = (*Source)(nil)
+
+// Option configures a Source.
+type Option func(*Source)
+
+// WithFileMode sets the file permission mode used when saving.
+// Default is 0644.
+func WithFileMode(mode os.FileMode) Option {
+	return func(s *Source) {
+		s.fileMode = mode
+	}
+}
+
+// WithDirMode sets the directory permission mode used when creating parent directories.
+// Default is 0755.
+func WithDirMode(mode os.FileMode) Option {
+	return func(s *Source) {
+		s.dirMode = mode
+	}
+}
+
+// WithSearchPaths adds additional paths to search for the configuration file.
+// During Load, files are searched in order: primary path first, then search paths.
+// The first existing file is used. If no file exists, the primary path is used.
+// During Save, the resolved path (found file or primary path) is used.
+func WithSearchPaths(paths ...string) Option {
+	return func(s *Source) {
+		s.searchPaths = append(s.searchPaths, paths...)
+	}
+}
+
+// New creates a source that reads from and writes to a file.
+// The path can be absolute or relative. Tilde (~) expansion is supported.
+//
+// Example:
+//
+//	src := fs.New("~/.config/app/config.yaml")
+//	src := fs.New("/etc/app/config.yaml")
+//	src := fs.New(".app.yaml")
+//	src := fs.New("config.yaml", fs.WithFileMode(0600), fs.WithDirMode(0700))
+//	src := fs.New("~/.config/app/config.yaml",
+//	    fs.WithSearchPaths("/etc/app/config.yaml", ".app.yaml"))
+func New(path string, opts ...Option) *Source {
+	s := &Source{
+		path:     path,
+		fileMode: DefaultFileMode,
+		dirMode:  DefaultDirMode,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// Load implements the source.Source interface.
+// If search paths are configured, files are searched in order:
+// primary path first, then search paths. The first existing file is loaded.
+// If no file exists, an error is returned for the primary path.
+func (s *Source) Load(ctx context.Context) ([]byte, error) {
+	// Check for cancellation
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	resolvedPath, originalPath, err := s.resolvePath()
+	if err != nil {
+		return nil, err
+	}
+
+	// Read file
+	data, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file %q: %w", originalPath, err)
+	}
+
+	// Cache the resolved path for subsequent operations
+	s.resolvedPath = resolvedPath
+
+	return data, nil
+}
+
+// Save implements the source.Source interface.
+// The write is performed atomically by writing to a temporary file first,
+// then renaming it to the target path. Parent directories are created if
+// they do not exist.
+// If a file was previously loaded via Load, the same path is used for saving.
+// Otherwise, the primary path is used.
+func (s *Source) Save(ctx context.Context, data []byte) error {
+	// Check for cancellation
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Use cached resolved path if available, otherwise resolve
+	targetPath := s.resolvedPath
+	if targetPath == "" {
+		var err error
+		targetPath, _, err = s.resolvePath()
+		if err != nil {
+			return err
+		}
+	}
+
+	// Ensure parent directory exists
+	dir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(dir, s.dirMode); err != nil {
+		return fmt.Errorf("failed to create directory %q: %w", dir, err)
+	}
+
+	// Create temporary file in the same directory to ensure atomic rename
+	tmpFile, err := os.CreateTemp(dir, ".jubako-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	// Clean up temporary file on error
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Write data to temporary file
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write to temporary file: %w", err)
+	}
+
+	// Sync to ensure data is flushed to disk
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to sync temporary file: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary file: %w", err)
+	}
+
+	// Set permissions
+	if err := os.Chmod(tmpPath, s.fileMode); err != nil {
+		return fmt.Errorf("failed to set file permissions: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return fmt.Errorf("failed to rename temporary file to %q: %w", targetPath, err)
+	}
+
+	success = true
+	return nil
+}
+
+// Path returns the primary file path for this source.
+func (s *Source) Path() string {
+	return s.path
+}
+
+// ResolvedPath returns the actual file path being used after resolution.
+// This may differ from Path() if a search path was used.
+// Returns the primary path if no file has been loaded yet.
+func (s *Source) ResolvedPath() string {
+	if s.resolvedPath != "" {
+		return s.resolvedPath
+	}
+	expanded, err := expandTilde(s.path)
+	if err != nil {
+		return s.path
+	}
+	return expanded
+}
+
+// resolvePath finds the first existing file from the search paths.
+// Returns (expandedPath, originalPath, error).
+// If no file exists, returns the expanded primary path.
+func (s *Source) resolvePath() (expanded string, original string, err error) {
+	// Build list of paths to search: primary path first, then search paths
+	allPaths := make([]string, 0, 1+len(s.searchPaths))
+	allPaths = append(allPaths, s.path)
+	allPaths = append(allPaths, s.searchPaths...)
+
+	// Search for the first existing file
+	for _, p := range allPaths {
+		expanded, err := expandTilde(p)
+		if err != nil {
+			continue
+		}
+		if _, statErr := os.Stat(expanded); statErr == nil {
+			return expanded, p, nil
+		}
+	}
+
+	// No file found, return primary path (will likely cause an error on read)
+	expanded, err = expandTilde(s.path)
+	if err != nil {
+		return "", s.path, fmt.Errorf("failed to expand path %q: %w", s.path, err)
+	}
+	return expanded, s.path, nil
+}
+
+// CanSave returns true because file system sources support saving.
+func (s *Source) CanSave() bool {
+	return true
+}
+
+// expandTilde expands tilde (~) in the path.
+// Handles both "~" (home directory) and "~/path" (path under home).
+func expandTilde(path string) (string, error) {
+	if len(path) == 0 || path[0] != '~' {
+		return path, nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to expand home directory: %w", err)
+	}
+
+	if len(path) == 1 {
+		// Just "~"
+		return homeDir, nil
+	}
+
+	if path[1] == '/' || path[1] == filepath.Separator {
+		// "~/path" - join home with the path after "~/"
+		return filepath.Join(homeDir, path[2:]), nil
+	}
+
+	// "~something" - not a valid home expansion, return as-is
+	return path, nil
+}

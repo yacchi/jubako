@@ -1,0 +1,196 @@
+package jubako
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/yacchi/jubako/jsonptr"
+)
+
+// materialize merges all layers into the resolved configuration value.
+// This method is called after loading or reloading layers.
+// IMPORTANT: Caller must hold the write lock (mu.Lock()).
+//
+// The merging process:
+// 1. Sort layers by priority (lowest first)
+// 2. Merge each layer's document into a single map, tracking origins
+// 3. Unmarshal the merged map into the configuration type T
+// 4. Update the resolved Cell with the new value
+// 5. Notify all subscribers
+func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
+	// Clear existing origins
+	s.origins.clear()
+
+	if len(s.layers) == 0 {
+		// No layers - use zero value
+		var zero T
+		s.resolved.Set(zero)
+		subscribers := append([]subscriber[T](nil), s.subscribers...)
+		return zero, subscribers, nil
+	}
+
+	// Merge all layers into a single map, tracking origins
+	// Layers are already sorted by priority (lowest first)
+	merged := make(map[string]any)
+	for _, entry := range s.layers {
+		doc := entry.layer.Document()
+		if doc == nil {
+			continue // Skip layers that haven't been loaded
+		}
+
+		// Get the entire document as a value
+		value, ok := doc.Get("")
+		if !ok {
+			continue
+		}
+
+		// Merge this layer's data into the accumulated map
+		layerMap, ok := value.(map[string]any)
+		if !ok {
+			var zero T
+			return zero, nil, fmt.Errorf("layer %q: document root is not a map", entry.layer.Name())
+		}
+
+		// Walk the map to track origins for all paths
+		walkMapForOrigins("", layerMap, entry, s.origins)
+
+		// Deep merge the layer map into merged
+		deepMerge(merged, layerMap)
+	}
+
+	// Convert merged map to type T
+	var result T
+	if err := decodeMap(merged, &result); err != nil {
+		var zero T
+		return zero, nil, fmt.Errorf("failed to decode merged config: %w", err)
+	}
+
+	// Update the resolved value. Subscribers are notified by the caller after locks are released.
+	s.resolved.Set(result)
+	subscribers := append([]subscriber[T](nil), s.subscribers...)
+	return result, subscribers, nil
+}
+
+// mergeValues merges two values and returns the result.
+// For maps, keys are merged recursively.
+// For other types (including slices), src replaces dst.
+// This is used for dynamic container resolution in GetAt.
+func mergeValues(dst, src any) any {
+	dstMap, dstIsMap := dst.(map[string]any)
+	srcMap, srcIsMap := src.(map[string]any)
+
+	if dstIsMap && srcIsMap {
+		// Both are maps - merge recursively into a copy
+		result := deepCopyValue(dstMap).(map[string]any)
+		deepMerge(result, srcMap)
+		return result
+	}
+
+	// Not both maps - src replaces dst
+	return deepCopyValue(src)
+}
+
+// deepMerge performs a deep merge of src into dst.
+// For maps, keys are merged recursively.
+// For other types, src values replace dst values.
+// Values are deep copied to avoid modifying the original src data.
+func deepMerge(dst, src map[string]any) {
+	for key, srcValue := range src {
+		dstValue, exists := dst[key]
+
+		if !exists {
+			// Key doesn't exist in dst - deep copy it
+			dst[key] = deepCopyValue(srcValue)
+			continue
+		}
+
+		// Both dst and src have this key - need to merge
+		dstMap, dstIsMap := dstValue.(map[string]any)
+		srcMap, srcIsMap := srcValue.(map[string]any)
+
+		if dstIsMap && srcIsMap {
+			// Both are maps - merge recursively
+			deepMerge(dstMap, srcMap)
+		} else {
+			// One or both are not maps - replace with deep copy
+			dst[key] = deepCopyValue(srcValue)
+		}
+	}
+}
+
+// deepCopyValue creates a deep copy of a value.
+// Maps and slices are recursively copied to avoid shared references.
+func deepCopyValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		copied := make(map[string]any, len(val))
+		for k, v := range val {
+			copied[k] = deepCopyValue(v)
+		}
+		return copied
+	case []any:
+		copied := make([]any, len(val))
+		for i, v := range val {
+			copied[i] = deepCopyValue(v)
+		}
+		return copied
+	default:
+		// Primitive types (string, int, float, bool, nil) are immutable
+		return v
+	}
+}
+
+// walkMapForOrigins recursively walks a map and records origins for all paths.
+// It records both leaf values and container paths.
+func walkMapForOrigins(prefix string, data map[string]any, entry *layerEntry, o *origins) {
+	for key, value := range data {
+		path := prefix + "/" + jsonptr.Escape(key)
+
+		switch v := value.(type) {
+		case map[string]any:
+			o.setContainer(path, entry)
+			walkMapForOrigins(path, v, entry, o)
+		case []any:
+			o.setContainer(path, entry)
+			walkSliceForOrigins(path, v, entry, o)
+		default:
+			o.setLeaf(path, entry)
+		}
+	}
+}
+
+// walkSliceForOrigins recursively walks a slice and records origins for all paths.
+func walkSliceForOrigins(prefix string, data []any, entry *layerEntry, o *origins) {
+	for i, value := range data {
+		path := fmt.Sprintf("%s/%d", prefix, i)
+
+		switch v := value.(type) {
+		case map[string]any:
+			o.setContainer(path, entry)
+			walkMapForOrigins(path, v, entry, o)
+		case []any:
+			o.setContainer(path, entry)
+			walkSliceForOrigins(path, v, entry, o)
+		default:
+			o.setLeaf(path, entry)
+		}
+	}
+}
+
+// decodeMap decodes a map[string]any into a typed struct using JSON as an intermediate.
+// This is a simple approach that leverages existing JSON decoding logic.
+// For better performance in the future, we could use a more direct reflection-based approach.
+func decodeMap(m map[string]any, target any) error {
+	// Marshal to JSON
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("failed to marshal map: %w", err)
+	}
+
+	// Unmarshal to target type
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("failed to unmarshal to target type: %w", err)
+	}
+
+	return nil
+}

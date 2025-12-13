@@ -1,0 +1,184 @@
+package jubako
+
+import (
+	"context"
+	"testing"
+
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/layer/mapdata"
+)
+
+func TestLayerPriority_Constants(t *testing.T) {
+	tests := []struct {
+		name     string
+		priority layer.Priority
+		want     int
+	}{
+		{name: "PriorityDefaults", priority: PriorityDefaults, want: 0},
+		{name: "PriorityUser", priority: PriorityUser, want: 10},
+		{name: "PriorityProject", priority: PriorityProject, want: 20},
+		{name: "PriorityEnv", priority: PriorityEnv, want: 30},
+		{name: "PriorityFlags", priority: PriorityFlags, want: 40},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if int(tt.priority) != tt.want {
+				t.Errorf("%s = %d, want %d", tt.name, tt.priority, tt.want)
+			}
+		})
+	}
+}
+
+func TestLayerPriority_Ordering(t *testing.T) {
+	// Verify that priorities are in ascending order
+	priorities := []layer.Priority{
+		PriorityDefaults,
+		PriorityUser,
+		PriorityProject,
+		PriorityEnv,
+		PriorityFlags,
+	}
+
+	for i := 0; i < len(priorities)-1; i++ {
+		if priorities[i] >= priorities[i+1] {
+			t.Errorf("Priority[%d] (%d) >= Priority[%d] (%d), expected ascending order",
+				i, priorities[i], i+1, priorities[i+1])
+		}
+	}
+}
+
+func TestMapdataLayer_Creation(t *testing.T) {
+	ctx := context.Background()
+	data := map[string]any{"test": "value"}
+
+	l := mapdata.New("test", data)
+
+	if l.Name() != "test" {
+		t.Errorf("Name() = %q, want %q", l.Name(), "test")
+	}
+	if l.Document() != nil {
+		t.Error("Document() should be nil before loading")
+	}
+
+	// Load and verify
+	doc, err := l.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if doc == nil {
+		t.Error("Load() returned nil document")
+	}
+	if l.Document() != doc {
+		t.Error("Document() should return loaded document")
+	}
+}
+
+func TestLayerPriority_CustomValues(t *testing.T) {
+	// Test that custom priorities can be used
+	// Use 15 which is between PriorityUser (10) and PriorityProject (20)
+	customPriority := layer.Priority(15)
+
+	if customPriority <= PriorityUser {
+		t.Errorf("Custom priority %d should be greater than PriorityUser (%d)",
+			customPriority, PriorityUser)
+	}
+	if customPriority >= PriorityProject {
+		t.Errorf("Custom priority %d should be less than PriorityProject (%d)",
+			customPriority, PriorityProject)
+	}
+}
+
+func TestMapdataLayer_Document(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("document is nil before load", func(t *testing.T) {
+		l := mapdata.New("test", map[string]any{"test": "value"})
+
+		if l.Document() != nil {
+			t.Error("Document() should return nil before loading")
+		}
+	})
+
+	t.Run("document is available after load", func(t *testing.T) {
+		l := mapdata.New("test", map[string]any{"test": "value"})
+
+		doc, err := l.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if doc == nil {
+			t.Error("Load() returned nil document")
+		}
+
+		if l.Document() == nil {
+			t.Error("Document() should return document after loading")
+		}
+
+		// Verify we can use the document
+		val, ok := l.Document().Get("/test")
+		if !ok {
+			t.Error("Get(/test) should succeed")
+		}
+		if val != "value" {
+			t.Errorf("Get(/test) = %v, want %q", val, "value")
+		}
+	})
+}
+
+func TestMapdataLayer_Save(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CanSave returns true for mapdata layer", func(t *testing.T) {
+		l := mapdata.New("test", map[string]any{"test": "value"})
+
+		if !l.CanSave() {
+			t.Error("CanSave() should return true for mapdata layer")
+		}
+	})
+
+	t.Run("save succeeds for mapdata layer", func(t *testing.T) {
+		l := mapdata.New("test", map[string]any{"test": "value"})
+
+		_, err := l.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// Modify via document
+		err = l.Document().Set("/test", "modified")
+		if err != nil {
+			t.Fatalf("Set() error = %v", err)
+		}
+
+		// Save should succeed (no-op but validates interface)
+		err = l.Save(ctx)
+		if err != nil {
+			t.Errorf("Save() error = %v, want nil", err)
+		}
+
+		// Data should be accessible
+		val, ok := l.Document().Get("/test")
+		if !ok {
+			t.Error("Get(/test) not found after save")
+		}
+		if val != "modified" {
+			t.Errorf("Get(/test) = %v, want %q", val, "modified")
+		}
+	})
+}
+
+func TestMapdataLayer_ContextCancellation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("context cancellation", func(t *testing.T) {
+		l := mapdata.New("test", map[string]any{"test": "data"})
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel() // Cancel immediately
+
+		_, err := l.Load(canceledCtx)
+		if err == nil {
+			t.Error("Load() should return error with canceled context")
+		}
+	})
+}
