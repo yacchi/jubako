@@ -1,5 +1,9 @@
 # Jubako
 
+[![CI](https://github.com/yacchi/jubako/actions/workflows/ci.yml/badge.svg)](https://github.com/yacchi/jubako/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/yacchi/jubako/graph/badge.svg)](https://codecov.io/gh/yacchi/jubako)
+[![Go Reference](https://pkg.go.dev/badge/github.com/yacchi/jubako.svg)](https://pkg.go.dev/github.com/yacchi/jubako)
+
 **Jubako** (重箱) is a layered configuration management library for Go.
 
 The name comes from traditional Japanese stacked boxes used for special occasions. Each layer (tier) contains different
@@ -206,9 +210,9 @@ ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
 
 ### Config Struct Definition
 
-When defining config structs, specify both `yaml` and `json` tags.
-The materialization process uses JSON internally to decode the merged map into your struct,
-so `json` tags are required.
+When defining config structs, `json` tags are required.
+The materialization process uses `encoding/json` internally to decode the merged map into your struct.
+Add format-specific tags such as `yaml` or `toml` as needed.
 
 ```go
 type AppConfig struct {

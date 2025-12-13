@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Download dependencies
+        run: |
+          go mod download
+          cd format/yaml && go mod download
+          cd ../toml && go mod download
+          cd ../jsonc && go mod download
+
+      - name: Run tests with coverage
+        run: |
+          # Test root module
+          go test -race -coverprofile=coverage-root.txt -covermode=atomic ./...
+
+          # Test format modules
+          cd format/yaml && go test -race -coverprofile=../../coverage-yaml.txt -covermode=atomic ./...
+          cd ../toml && go test -race -coverprofile=../../coverage-toml.txt -covermode=atomic ./...
+          cd ../jsonc && go test -race -coverprofile=../../coverage-jsonc.txt -covermode=atomic ./...
+
+      - name: Merge coverage files
+        run: |
+          # Combine all coverage files
+          echo "mode: atomic" > coverage.txt
+          tail -n +2 coverage-root.txt >> coverage.txt
+          tail -n +2 coverage-yaml.txt >> coverage.txt
+          tail -n +2 coverage-toml.txt >> coverage.txt
+          tail -n +2 coverage-jsonc.txt >> coverage.txt
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.txt
+          fail_ci_if_error: false
+          verbose: true
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Run go vet
+        run: |
+          go vet ./...
+          cd format/yaml && go vet ./...
+          cd ../toml && go vet ./...
+          cd ../jsonc && go vet ./...

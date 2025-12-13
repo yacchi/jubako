@@ -177,14 +177,14 @@ Jubako はパスベースの設定アクセスに JSON Pointer を使用しま�
 import "github.com/yacchi/jubako/jsonptr"
 
 // ポインタを構築
-ptr := jsonptr.Build("server", "port") // "/server/port"
-ptr := jsonptr.Build("servers", 0, "name") // "/servers/0/name"
+ptr1 := jsonptr.Build("server", "port")     // "/server/port"
+ptr2 := jsonptr.Build("servers", 0, "name") // "/servers/0/name"
 
 // ポインタを解析
 keys, _ := jsonptr.Parse("/server/port") // ["server", "port"]
 
 // 特殊文字の処理
-ptr := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
+ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
 ```
 
 **エスケープルール（RFC 6901）：**
@@ -194,18 +194,19 @@ ptr := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
 
 ### 設定構造体の定義
 
-設定構造体を定義する際は、`yaml` と `json` の両方のタグを指定してください。
-マテリアライズ処理では内部的に JSON を使用してマージ済みのマップを構造体にデコードするため、`json` タグが必要です。
+設定構造体を定義する際は、`json` タグが必須です。
+マテリアライズ処理では内部的に `encoding/json` を使ってマージ済みのマップを構造体にデコードします。
+必要に応じて `yaml` や `toml` などのフォーマット固有タグも付与してください。
 
 ```go
 type AppConfig struct {
-Server   ServerConfig   `yaml:"server" json:"server"`
-Database DatabaseConfig `yaml:"database" json:"database"`
+    Server   ServerConfig   `yaml:"server" json:"server"`
+    Database DatabaseConfig `yaml:"database" json:"database"`
 }
 
 type ServerConfig struct {
-Host string `yaml:"host" json:"host"`
-Port int    `yaml:"port" json:"port"`
+    Host string `yaml:"host" json:"host"`
+    Port int    `yaml:"port" json:"port"`
 }
 ```
 
@@ -222,7 +223,7 @@ Store は設定管理の中心となる型です。
 store := jubako.New[AppConfig]()
 
 // 自動優先度のステップを指定（デフォルト: 10）
-store := jubako.New[AppConfig](jubako.WithPriorityStep(100))
+storeWithStep := jubako.New[AppConfig](jubako.WithPriorityStep(100))
 ```
 
 #### レイヤーの追加
@@ -230,15 +231,15 @@ store := jubako.New[AppConfig](jubako.WithPriorityStep(100))
 ```go
 // 優先度を指定してレイヤーを追加
 err := store.Add(
-layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
-jubako.WithPriority(jubako.PriorityDefaults),
+    layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+    jubako.WithPriority(jubako.PriorityDefaults),
 )
 
 // 読み取り専用として追加（SetTo による変更を禁止）
-err := store.Add(
-layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
-jubako.WithPriority(jubako.PriorityDefaults),
-jubako.WithReadOnly(),
+err = store.Add(
+    layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
+    jubako.WithPriority(jubako.PriorityDefaults),
+    jubako.WithReadOnly(),
 )
 
 // 優先度を省略すると追加順に自動割り当て（0, 10, 20, ...）
@@ -253,7 +254,7 @@ store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()
 err := store.Load(ctx)
 
 // 設定をリロード
-err := store.Reload(ctx)
+err = store.Reload(ctx)
 
 // マージ済み設定を取得
 config := store.Get()
@@ -264,8 +265,8 @@ fmt.Println(config.Server.Port)
 
 ```go
 // 設定変更をサブスクライブ
-unsubscribe := store.Subscribe(func (cfg AppConfig) {
-log.Printf("Config changed: %+v", cfg)
+unsubscribe := store.Subscribe(func(cfg AppConfig) {
+    log.Printf("Config changed: %+v", cfg)
 })
 defer unsubscribe()
 ```
@@ -278,11 +279,11 @@ err := store.SetTo("user", "/server/port", 9000)
 
 // 変更があるか確認
 if store.IsDirty() {
-// 変更された全レイヤーを保存
-err := store.Save(ctx)
+    // 変更された全レイヤーを保存
+    err = store.Save(ctx)
 
-// または特定レイヤーのみ保存
-err := store.SaveLayer(ctx, "user")
+    // または特定レイヤーのみ保存
+    err = store.SaveLayer(ctx, "user")
 }
 ```
 
@@ -295,7 +296,7 @@ err := store.SaveLayer(ctx, "user")
 ```go
 rv := store.GetAt("/server/port")
 if rv.Exists {
-fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
+    fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
 }
 ```
 
@@ -304,8 +305,8 @@ fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
 ```go
 values := store.GetAllAt("/server/port")
 for _, rv := range values {
-fmt.Printf("port=%v (from layer %s, priority %d)\n",
-rv.Value, rv.Layer.Name(), rv.Layer.Priority())
+    fmt.Printf("port=%v (from layer %s, priority %d)\n",
+        rv.Value, rv.Layer.Name(), rv.Layer.Priority())
 }
 
 // 最も優先度の高い値を取得
@@ -317,22 +318,22 @@ fmt.Printf("effective: %v\n", effective.Value)
 
 ```go
 // 各パスの解決済み値を取得
-store.Walk(func (ctx jubako.WalkContext) bool {
-rv := ctx.Value()
-fmt.Printf("%s = %v (from %s)\n", ctx.Path, rv.Value, rv.Layer.Name())
-return true // 継続
+store.Walk(func(ctx jubako.WalkContext) bool {
+    rv := ctx.Value()
+    fmt.Printf("%s = %v (from %s)\n", ctx.Path, rv.Value, rv.Layer.Name())
+    return true // 継続
 })
 
 // 各パスの全レイヤー値を取得（オーバーライドチェーンの分析）
-store.Walk(func (ctx jubako.WalkContext) bool {
-allValues := ctx.AllValues()
-if allValues.Len() > 1 {
-fmt.Printf("%s has values from %d layers:\n", ctx.Path, allValues.Len())
-for _, rv := range allValues {
-fmt.Printf("  - %s: %v\n", rv.Layer.Name(), rv.Value)
-}
-}
-return true
+store.Walk(func(ctx jubako.WalkContext) bool {
+    allValues := ctx.AllValues()
+    if allValues.Len() > 1 {
+        fmt.Printf("%s has values from %d layers:\n", ctx.Path, allValues.Len())
+        for _, rv := range allValues {
+            fmt.Printf("  - %s: %v\n", rv.Layer.Name(), rv.Value)
+        }
+    }
+    return true
 })
 ```
 

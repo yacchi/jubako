@@ -217,7 +217,7 @@ type Store[T any] struct {
 // Example:
 //
 //	store := jubako.New[AppConfig]()
-//	store := jubako.New[AppConfig](jubako.WithPriorityStep(100))
+//	storeWithStep := jubako.New[AppConfig](jubako.WithPriorityStep(100))
 func New[T any](opts ...StoreOption) *Store[T] {
 	// Apply options
 	options := storeOptions{
