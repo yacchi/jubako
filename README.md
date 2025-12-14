@@ -1138,7 +1138,7 @@ See the following packages for existing implementations:
 
 ## License
 
-MIT License
+Apache License 2.0
 
 ## Contributing
 
