@@ -422,6 +422,63 @@ jubako/
 4. **Concurrency tests**: Race condition detection
 5. **Benchmark**: Measure read performance under concurrent access
 
+### Running Tests
+
+```bash
+# Setup (required before first run)
+make setup          # Creates go.work for local multi-module development
+
+# Run all tests
+make test           # Tests all modules with -race flag
+
+# Run tests with coverage
+make test-cover     # Generates coverage.out and coverage.html
+
+# Run tests for specific module
+go test -v ./...                          # Root module only
+go test -v ./format/yaml/...              # Specific submodule
+go test -v -race ./format/... ./layer/... # Multiple submodules
+
+# Run specific test
+go test -v -run TestDocument_Compliance ./format/yaml/...
+
+# Run with coverage for specific module
+go test -v -coverprofile=coverage.out -covermode=atomic ./...
+go tool cover -html=coverage.out -o coverage.html
+go tool cover -func=coverage.out    # Show coverage by function
+
+# Race detection
+go test -race ./...
+```
+
+### Compliance Testing Framework (jktest)
+
+The `jktest` package provides standardized compliance tests for Layer implementations:
+
+```go
+import "github.com/yacchi/jubako/jktest"
+
+// For Document implementations
+func TestDocument_Compliance(t *testing.T) {
+    factory := jktest.DocumentLayerFactory(yaml.New())
+    jktest.NewLayerTester(t, factory).TestAll()
+}
+
+// For Layer implementations
+func TestLayer_Compliance(t *testing.T) {
+    factory := func(data map[string]any) layer.Layer {
+        return mapdata.New("test", data)
+    }
+    jktest.NewLayerTester(t, factory).TestAll()
+}
+
+// With skip options for unsupported features
+jktest.NewLayerTester(t, factory,
+    jktest.SkipNullTest(),  // TOML doesn't support null
+    jktest.SkipArrayTest(), // Env layer doesn't support arrays
+).TestAll()
+```
+
 ## Dependencies
 
 ### Optional Dependencies (Phase 4+)
