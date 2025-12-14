@@ -162,7 +162,7 @@ For complete working examples, see the [examples/](examples/) directory:
 - [basic](examples/basic/) - Basic usage (adding layers, loading, modifying, saving)
 - [env-override](examples/env-override/) - Environment variable overrides
 - [origin-tracking](examples/origin-tracking/) - Detailed origin tracking features
-- [path-remapping](examples/path-remapping/) - Path remapping with jubako struct tags
+- [path-remapping](examples/path-remapping/) - Path remapping with jubako struct tags (absolute/relative paths, slice/map support)
 
 ## Core Concepts
 
