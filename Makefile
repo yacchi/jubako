@@ -1,8 +1,17 @@
-.PHONY: build test lint clean fmt vet
+.PHONY: build test lint clean fmt vet examples
 
 # Build
 build:
 	go build ./...
+
+# Run examples (verify they compile and execute)
+examples:
+	@echo "Running examples..."
+	@for dir in examples/*/; do \
+		echo "  Running $$dir..."; \
+		go run "./$$dir" || exit 1; \
+	done
+	@echo "All examples passed."
 
 # Test
 test:
