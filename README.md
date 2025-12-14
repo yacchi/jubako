@@ -406,103 +406,26 @@ See [examples/path-remapping](examples/path-remapping/) for a complete working e
 ### Custom Decoder
 
 By default, Jubako uses `encoding/json` to convert the merged `map[string]any` into your config struct.
-You can replace this decoder with alternatives like [mapstructure](https://github.com/mitchellh/mapstructure)
-for more flexible decoding options.
+You can replace this decoder using the `WithDecoder` option:
 
-#### Decoder Function Signature
+```go
+store := jubako.New[Config](jubako.WithDecoder(myCustomDecoder))
+```
 
 The decoder must match the `decoder.Func` type:
 
 ```go
-// decoder/decoder.go
 type Func func(data map[string]any, target any) error
 ```
 
-#### Using mapstructure
+**When to use a custom decoder:**
 
-[mapstructure](https://github.com/mitchellh/mapstructure) is a popular library for decoding
-`map[string]any` into structs. It offers features like:
+- Use custom struct tags (e.g., `mapstructure` instead of `json`)
+- Enable weak type conversion (e.g., string `"8080"` to int `8080`)
+- Handle embedded structs or remaining fields capture
+- Integrate with existing decoding pipelines
 
-- Custom tag names (use `mapstructure` tags instead of `json`)
-- Weak type conversion (strings to numbers, etc.)
-- Embedded struct support
-- Remaining fields capture
-
-**Example**:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-
-	"github.com/mitchellh/mapstructure"
-	"github.com/yacchi/jubako"
-	"github.com/yacchi/jubako/layer/mapdata"
-)
-
-// Config uses mapstructure tags instead of json tags
-type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-}
-
-type ServerConfig struct {
-	Host string `mapstructure:"host"`
-	Port int    `mapstructure:"port"`
-}
-
-type DatabaseConfig struct {
-	URL string `mapstructure:"url"`
-}
-
-// mapstructureDecoder wraps mapstructure.Decode to match decoder.Func
-func mapstructureDecoder(data map[string]any, target any) error {
-	config := &mapstructure.DecoderConfig{
-		Result:           target,
-		WeaklyTypedInput: true, // Enable weak type conversion
-		TagName:          "mapstructure",
-	}
-	decoder, err := mapstructure.NewDecoder(config)
-	if err != nil {
-		return err
-	}
-	return decoder.Decode(data)
-}
-
-func main() {
-	ctx := context.Background()
-
-	// Create store with custom decoder
-	store := jubako.New[Config](jubako.WithDecoder(mapstructureDecoder))
-
-	configData := map[string]any{
-		"server": map[string]any{
-			"host": "localhost",
-			"port": "8080", // String will be converted to int
-		},
-		"database": map[string]any{
-			"url": "postgres://localhost/myapp",
-		},
-	}
-
-	if err := store.Add(mapdata.New("config", configData)); err != nil {
-		log.Fatal(err)
-	}
-	if err := store.Load(ctx); err != nil {
-		log.Fatal(err)
-	}
-
-	config := store.Get()
-	fmt.Printf("Server: %s:%d\n", config.Server.Host, config.Server.Port)
-	// Output: Server: localhost:8080
-}
-```
-
-**Note**: When using a custom decoder, the `json` tags are no longer required.
-Use the appropriate tags for your decoder (e.g., `mapstructure` for mapstructure).
+See [examples/custom-decoder](examples/custom-decoder/) for a complete example using [mapstructure](https://github.com/mitchellh/mapstructure).
 
 ## API Reference
 

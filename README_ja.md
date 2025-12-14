@@ -15,6 +15,8 @@
     - [レイヤー](#レイヤー)
     - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
     - [設定構造体の定義](#設定構造体の定義)
+    - [パスリマッピング (jubako タグ)](#パスリマッピング-jubako-タグ)
+    - [カスタムデコーダー](#カスタムデコーダー)
 - [API リファレンス](#api-リファレンス)
     - [Store[T]](#storet)
     - [オリジン追跡](#オリジン追跡)
@@ -144,6 +146,8 @@ func main() {
 - [basic](examples/basic/) - 基本的な使い方（レイヤー追加、読み込み、変更、保存）
 - [env-override](examples/env-override/) - 環境変数による設定上書き
 - [origin-tracking](examples/origin-tracking/) - オリジン追跡機能の詳細
+- [path-remapping](examples/path-remapping/) - jubako タグによるパスリマッピング（絶対/相対パス、slice/map 対応）
+- [custom-decoder](examples/custom-decoder/) - mapstructure を使ったカスタムデコーダー
 
 ## コアコンセプト
 
@@ -236,6 +240,153 @@ type DatabaseConfig struct {
 	URL string `yaml:"url" json:"url"`
 }
 ```
+
+**高度な機能：**
+
+- [jubako タグ](#パスリマッピング-jubako-タグ)を使用してネストされた設定パスをフラットな構造体フィールドにリマップ
+- [カスタムデコーダー](#カスタムデコーダー)（mapstructure 等）でより柔軟なデコードを実現
+
+### パスリマッピング (jubako タグ)
+
+`jubako` 構造体タグを使用すると、ネストされた設定パスをフラットな構造体フィールドにリマップできます。
+設定ファイルは可読性のためにネスト構造を使用し、アプリケーションコードでは利便性のためにフラットな構造体を使用したい場合に便利です。
+
+#### パスの種類
+
+| 形式 | 例 | 説明 |
+|-----|---|-----|
+| 絶対パス | `/server/host` | ルートから解決（`/` で始まる） |
+| 相対パス | `connection/host` | 現在のコンテキストから解決 |
+| 相対パス（明示的） | `./connection/host` | 上記と同じ、明示的な構文 |
+
+#### 基本的な使い方
+
+```go
+package main
+
+// 設定ファイルの構造（可読性のためにネスト）:
+//   server:
+//     http:
+//       read_timeout: 30
+//       write_timeout: 60
+//
+// Go 構造体（利便性のためにフラット）:
+type ServerConfig struct {
+	Host         string `json:"host" jubako:"/server/host"`
+	Port         int    `json:"port" jubako:"/server/port"`
+	ReadTimeout  int    `json:"read_timeout" jubako:"/server/http/read_timeout"`
+	WriteTimeout int    `json:"write_timeout" jubako:"/server/http/write_timeout"`
+	// リマッピングから除外
+	Internal     string `json:"internal" jubako:"-"`
+}
+```
+
+#### スライス要素での相対パス
+
+構造体要素がスライス内にある場合、相対パス（先頭に `/` なし）を使用して
+各要素のコンテキストから解決します：
+
+```go
+package main
+
+// 設定ファイルの構造:
+//   defaults:
+//     timeout: 30
+//   nodes:
+//     - connection:
+//         host: node1.example.com
+//         port: 5432
+//     - connection:
+//         host: node2.example.com
+//         port: 5433
+
+type Node struct {
+	// 相対パス - 各スライス要素から解決
+	Host string `json:"host" jubako:"connection/host"`
+	Port int    `json:"port" jubako:"connection/port"`
+	// 絶対パス - ルートから解決（全要素で共有）
+	DefaultTimeout int `json:"default_timeout" jubako:"/defaults/timeout"`
+}
+
+type ClusterConfig struct {
+	Nodes []Node `json:"nodes"`
+}
+```
+
+#### マップ値での相対パス
+
+マップ値でも同じパターンが使用できます：
+
+```go
+package main
+
+// 設定ファイルの構造:
+//   defaults:
+//     retries: 3
+//   services:
+//     api:
+//       settings:
+//         endpoint: https://api.example.com
+//     web:
+//       settings:
+//         endpoint: https://web.example.com
+
+type ServiceConfig struct {
+	// 相対パス - 各マップ値から解決
+	Endpoint string `json:"endpoint" jubako:"settings/endpoint"`
+	// 絶対パス - ルートから解決
+	DefaultRetries int `json:"default_retries" jubako:"/defaults/retries"`
+}
+
+type Config struct {
+	Services map[string]ServiceConfig `json:"services"`
+}
+```
+
+#### マッピングテーブルの確認
+
+デバッグ用にマッピングテーブルを確認できます：
+
+```go
+store := jubako.New[ClusterConfig]()
+
+// jubako マッピングがあるか確認
+if store.HasMappings() {
+	fmt.Println(store.MappingTable())
+}
+
+// 出力:
+// nodes[]: (slice element)
+//   host <- ./connection/host (relative)
+//   port <- ./connection/port (relative)
+//   default_timeout <- /defaults/timeout
+```
+
+完全な動作例は [examples/path-remapping](examples/path-remapping/) を参照してください。
+
+### カスタムデコーダー
+
+デフォルトでは、Jubako は `encoding/json` を使用してマージ済みの `map[string]any` を設定構造体に変換します。
+`WithDecoder` オプションを使用してこのデコーダーを置き換えることができます：
+
+```go
+store := jubako.New[Config](jubako.WithDecoder(myCustomDecoder))
+```
+
+デコーダーは `decoder.Func` 型に一致する必要があります：
+
+```go
+type Func func(data map[string]any, target any) error
+```
+
+**カスタムデコーダーを使用する場面：**
+
+- カスタム構造体タグを使用（例：`json` の代わりに `mapstructure`）
+- 弱い型変換を有効化（例：文字列 `"8080"` を int `8080` に変換）
+- 埋め込み構造体や残りフィールドのキャプチャを処理
+- 既存のデコードパイプラインとの統合
+
+完全な使用例は [examples/custom-decoder](examples/custom-decoder/) を参照してください（[mapstructure](https://github.com/mitchellh/mapstructure) を使用）。
 
 ## API リファレンス
 
