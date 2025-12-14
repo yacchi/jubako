@@ -21,6 +21,7 @@ items, and together they form a complete set - much like how this library manage
     - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
     - [Config Struct Definition](#config-struct-definition)
     - [Path Remapping (jubako tag)](#path-remapping-jubako-tag)
+    - [Custom Decoder](#custom-decoder)
 - [API Reference](#api-reference)
     - [Store[T]](#storet)
     - [Origin Tracking](#origin-tracking)
@@ -163,6 +164,7 @@ For complete working examples, see the [examples/](examples/) directory:
 - [env-override](examples/env-override/) - Environment variable overrides
 - [origin-tracking](examples/origin-tracking/) - Detailed origin tracking features
 - [path-remapping](examples/path-remapping/) - Path remapping with jubako struct tags (absolute/relative paths, slice/map support)
+- [custom-decoder](examples/custom-decoder/) - Using mapstructure as a custom decoder
 
 ## Core Concepts
 
@@ -235,7 +237,7 @@ func main() {
 
 ### Config Struct Definition
 
-When defining config structs, `json` tags are required.
+When defining config structs, `json` tags are required by default.
 The materialization process uses `encoding/json` internally to decode the merged map into your struct.
 Add format-specific tags such as `yaml` or `toml` as needed.
 
@@ -256,6 +258,11 @@ type DatabaseConfig struct {
 	URL string `yaml:"url" json:"url"`
 }
 ```
+
+**Advanced features:**
+
+- Use [jubako struct tags](#path-remapping-jubako-tag) to remap nested config paths to flat struct fields
+- Use [custom decoders](#custom-decoder) (e.g., mapstructure) for more flexible decoding
 
 ### Path Remapping (jubako tag)
 
@@ -395,6 +402,107 @@ func main() {
 ```
 
 See [examples/path-remapping](examples/path-remapping/) for a complete working example.
+
+### Custom Decoder
+
+By default, Jubako uses `encoding/json` to convert the merged `map[string]any` into your config struct.
+You can replace this decoder with alternatives like [mapstructure](https://github.com/mitchellh/mapstructure)
+for more flexible decoding options.
+
+#### Decoder Function Signature
+
+The decoder must match the `decoder.Func` type:
+
+```go
+// decoder/decoder.go
+type Func func(data map[string]any, target any) error
+```
+
+#### Using mapstructure
+
+[mapstructure](https://github.com/mitchellh/mapstructure) is a popular library for decoding
+`map[string]any` into structs. It offers features like:
+
+- Custom tag names (use `mapstructure` tags instead of `json`)
+- Weak type conversion (strings to numbers, etc.)
+- Embedded struct support
+- Remaining fields capture
+
+**Example**:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/mitchellh/mapstructure"
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/layer/mapdata"
+)
+
+// Config uses mapstructure tags instead of json tags
+type Config struct {
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+}
+
+type ServerConfig struct {
+	Host string `mapstructure:"host"`
+	Port int    `mapstructure:"port"`
+}
+
+type DatabaseConfig struct {
+	URL string `mapstructure:"url"`
+}
+
+// mapstructureDecoder wraps mapstructure.Decode to match decoder.Func
+func mapstructureDecoder(data map[string]any, target any) error {
+	config := &mapstructure.DecoderConfig{
+		Result:           target,
+		WeaklyTypedInput: true, // Enable weak type conversion
+		TagName:          "mapstructure",
+	}
+	decoder, err := mapstructure.NewDecoder(config)
+	if err != nil {
+		return err
+	}
+	return decoder.Decode(data)
+}
+
+func main() {
+	ctx := context.Background()
+
+	// Create store with custom decoder
+	store := jubako.New[Config](jubako.WithDecoder(mapstructureDecoder))
+
+	configData := map[string]any{
+		"server": map[string]any{
+			"host": "localhost",
+			"port": "8080", // String will be converted to int
+		},
+		"database": map[string]any{
+			"url": "postgres://localhost/myapp",
+		},
+	}
+
+	if err := store.Add(mapdata.New("config", configData)); err != nil {
+		log.Fatal(err)
+	}
+	if err := store.Load(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	config := store.Get()
+	fmt.Printf("Server: %s:%d\n", config.Server.Host, config.Server.Port)
+	// Output: Server: localhost:8080
+}
+```
+
+**Note**: When using a custom decoder, the `json` tags are no longer required.
+Use the appropriate tags for your decoder (e.g., `mapstructure` for mapstructure).
 
 ## API Reference
 
