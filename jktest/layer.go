@@ -87,6 +87,7 @@ func NewLayerTester(t *testing.T, factory LayerFactory, opts ...LayerTesterOptio
 // TestAll runs all standard compliance tests.
 func (lt *LayerTester) TestAll() {
 	lt.t.Run("Load", lt.testLoad)
+	lt.t.Run("LoadEmpty", lt.testLoadEmpty)
 	lt.t.Run("LoadPath", lt.testLoadPath)
 	lt.t.Run("NestedPaths", lt.testNestedPaths)
 	lt.t.Run("SpecialValues", lt.testSpecialValues)
@@ -111,6 +112,43 @@ func (lt *LayerTester) testLoad(t *testing.T) {
 	if data["key"] != "value" {
 		t.Errorf("Load returned %v, want map with key=value", data)
 	}
+}
+
+// testLoadEmpty verifies Load handles empty/nil data correctly.
+func (lt *LayerTester) testLoadEmpty(t *testing.T) {
+	// Test with empty map
+	t.Run("empty_map", func(t *testing.T) {
+		l := lt.factory(map[string]any{})
+
+		data, err := l.Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load error = %v", err)
+		}
+
+		if data == nil {
+			t.Fatal("Load returned nil for empty map")
+		}
+		if len(data) != 0 {
+			t.Errorf("Load returned non-empty map for empty input: %v", data)
+		}
+	})
+
+	// Test with nil map (should return empty map, not nil)
+	t.Run("nil_map", func(t *testing.T) {
+		l := lt.factory(nil)
+
+		data, err := l.Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load error = %v", err)
+		}
+
+		if data == nil {
+			t.Fatal("Load returned nil for nil map")
+		}
+		if len(data) != 0 {
+			t.Errorf("Load returned non-empty map for nil input: %v", data)
+		}
+	})
 }
 
 // testLoadPath verifies values can be read from loaded data using jsonptr.
