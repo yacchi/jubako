@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/tailscale/hujson"
 	"github.com/yacchi/jubako/document"
@@ -115,6 +116,13 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 			continue
 		}
 
+		// For add operations, ensure intermediate objects exist
+		if op == "add" {
+			if err := ensureIntermediateObjects(&root, patch.Path); err != nil {
+				continue
+			}
+		}
+
 		patchObj := map[string]any{
 			"op":   op,
 			"path": patch.Path,
@@ -144,4 +152,75 @@ func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal JSONC test data: %w", err)
 	}
 	return append(b, '\n'), nil
+}
+
+// ensureIntermediateObjects creates intermediate objects for a JSON Pointer path.
+// For example, if path is "/a/b/c", it ensures "/a" and "/a/b" exist as objects.
+// It only creates objects when they don't already exist.
+func ensureIntermediateObjects(root *hujson.Value, path string) error {
+	if path == "" || path == "/" {
+		return nil
+	}
+
+	// Parse the path into segments
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) <= 1 {
+		return nil // No intermediate objects needed
+	}
+
+	// Parse root to map to check existing paths (without modifying root)
+	// Use a separate parse to avoid any side effects
+	rootBytes := root.Pack()
+	tempRoot, err := hujson.Parse(rootBytes)
+	if err != nil {
+		return nil
+	}
+	tempRoot.Standardize()
+	var currentData map[string]any
+	if err := json.Unmarshal(tempRoot.Pack(), &currentData); err != nil {
+		currentData = map[string]any{}
+	}
+
+	// Track which paths we need to create
+	pathsToCreate := []string{}
+	current := currentData
+	currentPath := ""
+
+	for i := 0; i < len(parts)-1; i++ {
+		currentPath += "/" + parts[i]
+
+		// Check if this path already exists
+		if val, ok := current[parts[i]]; ok {
+			// Path exists - navigate deeper if it's an object
+			if m, ok := val.(map[string]any); ok {
+				current = m
+				continue
+			}
+			// Path exists but is not an object - can't create intermediate paths
+			return nil
+		}
+
+		// Path doesn't exist - mark it for creation
+		pathsToCreate = append(pathsToCreate, currentPath)
+		// For the next iteration, pretend we have an empty object
+		current = map[string]any{}
+	}
+
+	// Create the missing paths
+	for _, p := range pathsToCreate {
+		patchObj := []map[string]any{{
+			"op":    "add",
+			"path":  p,
+			"value": map[string]any{},
+		}}
+		patchBytes, err := json.Marshal(patchObj)
+		if err != nil {
+			continue
+		}
+		if err := root.Patch(patchBytes); err != nil {
+			return nil
+		}
+	}
+
+	return nil
 }

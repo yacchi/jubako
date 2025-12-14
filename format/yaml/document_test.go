@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/yacchi/jubako/document"
+	"github.com/yacchi/jubako/jktest"
 )
 
 func TestNew(t *testing.T) {
@@ -511,4 +512,10 @@ server:
 func TestDocument_Interface(t *testing.T) {
 	var _ document.Document = (*Document)(nil)
 	var _ document.Document = New()
+}
+
+// TestDocument_Compliance runs the standard jktest compliance tests.
+func TestDocument_Compliance(t *testing.T) {
+	factory := jktest.DocumentLayerFactory(New())
+	jktest.NewLayerTester(t, factory).TestAll()
 }

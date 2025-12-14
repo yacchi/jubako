@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/yacchi/jubako/document"
+	"github.com/yacchi/jubako/jktest"
 )
 
 func TestDocument_Get(t *testing.T) {
@@ -192,4 +193,10 @@ func TestDocument_Get_NilData(t *testing.T) {
 	if !reflect.DeepEqual(data, map[string]any{}) {
 		t.Errorf("Get() with nil data = %v, want empty map", data)
 	}
+}
+
+// TestDocument_Compliance runs the standard jktest compliance tests.
+func TestDocument_Compliance(t *testing.T) {
+	factory := jktest.DocumentLayerFactory(New())
+	jktest.NewLayerTester(t, factory).TestAll()
 }

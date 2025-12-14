@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yacchi/jubako/jktest"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
 )
@@ -124,25 +125,6 @@ func TestLayer_Load(t *testing.T) {
 		_, err := l.Load(canceledCtx)
 		if err == nil {
 			t.Error("Load() should return error with canceled context")
-		}
-	})
-}
-
-func TestLayer_RootData(t *testing.T) {
-	ctx := context.Background()
-
-	t.Setenv("TESTDOC_VALUE", "original")
-
-	l := New("env", "TESTDOC_")
-
-	data, err := l.Load(ctx)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	t.Run("root data is a map", func(t *testing.T) {
-		if data == nil {
-			t.Error("Load() should return root map")
 		}
 	})
 }
@@ -479,4 +461,20 @@ func TestLayer_Save(t *testing.T) {
 	if err == nil {
 		t.Error("env.Layer.Save() should return error")
 	}
+}
+
+// TestLayer_Compliance runs the standard jktest compliance tests.
+// Env layers don't support null values or arrays, so those tests are skipped.
+func TestLayer_Compliance(t *testing.T) {
+	factory := func(data map[string]any) layer.Layer {
+		// Use "__" as delimiter to preserve underscores in key names
+		envVars := jktest.MapToEnvVars("TEST_", "__", data)
+		return New("test", "TEST_", WithDelimiter("__"), WithEnvironFunc(func() []string {
+			return envVars
+		}))
+	}
+	jktest.NewLayerTester(t, factory,
+		jktest.SkipNullTest(),  // env vars can't represent null
+		jktest.SkipArrayTest(), // env vars can't represent arrays
+	).TestAll()
 }

@@ -5,7 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/yacchi/jubako/document"
+	"github.com/yacchi/jubako/jktest"
+	"github.com/yacchi/jubako/layer"
 )
 
 func TestNew(t *testing.T) {
@@ -43,33 +44,6 @@ func TestNew(t *testing.T) {
 
 func TestLayer_Load(t *testing.T) {
 	ctx := context.Background()
-
-	t.Run("loads data as map", func(t *testing.T) {
-		data := map[string]any{
-			"server": map[string]any{
-				"host": "localhost",
-				"port": 8080,
-			},
-		}
-		l := New("test", data)
-
-		result, err := l.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load() error = %v", err)
-		}
-		if result == nil {
-			t.Fatal("Load() returned nil")
-		}
-
-		// Verify content
-		server, ok := result["server"].(map[string]any)
-		if !ok {
-			t.Fatal("result[server] is not a map")
-		}
-		if server["host"] != "localhost" {
-			t.Errorf("server[host] = %v, want localhost", server["host"])
-		}
-	})
 
 	t.Run("returns deep copy", func(t *testing.T) {
 		data := map[string]any{"key": "original"}
@@ -119,34 +93,16 @@ func TestLayer_Data(t *testing.T) {
 
 func TestLayer_Save(t *testing.T) {
 	ctx := context.Background()
-	l := New("test", map[string]any{"key": "value"})
 
-	// Save should apply changeset to internal data
-	changeset := document.JSONPatchSet{
-		document.NewReplacePatch("/key", "new"),
-		document.NewAddPatch("/extra", "data"),
-	}
-	err := l.Save(ctx, changeset)
-	if err != nil {
-		t.Errorf("Save() error = %v, want nil", err)
-	}
-
-	// Verify data was updated
-	data := l.Data()
-	if data["key"] != "new" {
-		t.Errorf("data[key] = %v, want new", data["key"])
-	}
-	if data["extra"] != "data" {
-		t.Errorf("data[extra] = %v, want data", data["extra"])
-	}
-
-	// Save should respect context cancellation
-	canceledCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	err = l.Save(canceledCtx, nil)
-	if err == nil {
-		t.Error("Save() should return error with canceled context")
-	}
+	t.Run("respects context cancellation", func(t *testing.T) {
+		l := New("test", map[string]any{"key": "value"})
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		err := l.Save(canceledCtx, nil)
+		if err == nil {
+			t.Error("Save() should return error with canceled context")
+		}
+	})
 }
 
 func TestLayer_CanSave(t *testing.T) {
@@ -154,26 +110,6 @@ func TestLayer_CanSave(t *testing.T) {
 
 	if !l.CanSave() {
 		t.Error("CanSave() should return true")
-	}
-}
-
-func TestLayer_SaveWithChangeset(t *testing.T) {
-	ctx := context.Background()
-	l := New("test", map[string]any{"key": "value"})
-
-	// Changeset should be applied to mapdata layers
-	changeset := document.JSONPatchSet{
-		document.NewReplacePatch("/key", "new"),
-	}
-
-	err := l.Save(ctx, changeset)
-	if err != nil {
-		t.Errorf("Save() with changeset error = %v, want nil", err)
-	}
-
-	// Data should reflect the changeset
-	if l.Data()["key"] != "new" {
-		t.Errorf("data[key] = %v, want new", l.Data()["key"])
 	}
 }
 
@@ -231,4 +167,12 @@ func TestLayer_EmptyData(t *testing.T) {
 	if !reflect.DeepEqual(result, map[string]any{}) {
 		t.Errorf("Load() = %v, want empty map", result)
 	}
+}
+
+// TestLayer_Compliance runs the standard jktest compliance tests.
+func TestLayer_Compliance(t *testing.T) {
+	factory := func(data map[string]any) layer.Layer {
+		return New("test", data)
+	}
+	jktest.NewLayerTester(t, factory).TestAll()
 }
