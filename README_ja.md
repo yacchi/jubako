@@ -94,25 +94,33 @@ func main() {
 	store := jubako.New[AppConfig]()
 
 	// 設定レイヤーを追加（優先度の低い順）
-	store.Add(
+	if err := store.Add(
 		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
 		jubako.WithPriority(jubako.PriorityDefaults),
-	)
+	); err != nil {
+		log.Fatal(err)
+	}
 
-	store.Add(
+	if err := store.Add(
 		layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.NewParser()),
 		jubako.WithPriority(jubako.PriorityUser),
-	)
+	); err != nil {
+		log.Fatal(err)
+	}
 
-	store.Add(
+	if err := store.Add(
 		layer.New("project", fs.New(".app.yaml"), yaml.NewParser()),
 		jubako.WithPriority(jubako.PriorityProject),
-	)
+	); err != nil {
+		log.Fatal(err)
+	}
 
-	store.Add(
+	if err := store.Add(
 		env.New("env", "APP_"),
 		jubako.WithPriority(jubako.PriorityEnv),
-	)
+	); err != nil {
+		log.Fatal(err)
+	}
 
 	// 設定を読み込みマテリアライズ
 	if err := store.Load(ctx); err != nil {
@@ -144,13 +152,17 @@ func main() {
 各設定ソースは優先度を持つレイヤーとして表現されます。優先度の高いレイヤーが低いレイヤーの値を上書きします。
 
 ```go
-const (
-PriorityDefaults LayerPriority = 0  // 最低 - デフォルト値
-PriorityUser     LayerPriority = 10 // ユーザーレベル設定 (~/.config)
-PriorityProject  LayerPriority = 20 // プロジェクトレベル設定 (.app.yaml)
-PriorityEnv      LayerPriority = 30 // 環境変数
-PriorityFlags    LayerPriority = 40 // 最高 - コマンドラインフラグ
-)
+package main
+
+import "github.com/yacchi/jubako"
+
+func main() {
+	_ = jubako.PriorityDefaults // 0: 最低
+	_ = jubako.PriorityUser     // 10
+	_ = jubako.PriorityProject  // 20
+	_ = jubako.PriorityEnv      // 30
+	_ = jubako.PriorityFlags    // 40: 最高
+}
 ```
 
 **優先度順序の例:**
@@ -174,17 +186,26 @@ PriorityFlags    LayerPriority = 40 // 最高 - コマンドラインフラグ
 Jubako はパスベースの設定アクセスに JSON Pointer を使用します：
 
 ```go
+package main
+
 import "github.com/yacchi/jubako/jsonptr"
 
-// ポインタを構築
-ptr1 := jsonptr.Build("server", "port")     // "/server/port"
-ptr2 := jsonptr.Build("servers", 0, "name") // "/servers/0/name"
+func main() {
+	// ポインタを構築
+	ptr1 := jsonptr.Build("server", "port")     // "/server/port"
+	ptr2 := jsonptr.Build("servers", 0, "name") // "/servers/0/name"
 
-// ポインタを解析
-keys, _ := jsonptr.Parse("/server/port") // ["server", "port"]
+	// ポインタを解析
+	keys, _ := jsonptr.Parse("/server/port") // ["server", "port"]
 
-// 特殊文字の処理
-ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
+	// 特殊文字の処理
+	ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
+
+	_ = ptr1
+	_ = ptr2
+	_ = ptr3
+	_ = keys
+}
 ```
 
 **エスケープルール（RFC 6901）：**
@@ -199,14 +220,20 @@ ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
 必要に応じて `yaml` や `toml` などのフォーマット固有タグも付与してください。
 
 ```go
+package main
+
 type AppConfig struct {
-    Server   ServerConfig   `yaml:"server" json:"server"`
-    Database DatabaseConfig `yaml:"database" json:"database"`
+	Server   ServerConfig   `yaml:"server" json:"server"`
+	Database DatabaseConfig `yaml:"database" json:"database"`
 }
 
 type ServerConfig struct {
-    Host string `yaml:"host" json:"host"`
-    Port int    `yaml:"port" json:"port"`
+	Host string `yaml:"host" json:"host"`
+	Port int    `yaml:"port" json:"port"`
+}
+
+type DatabaseConfig struct {
+	URL string `yaml:"url" json:"url"`
 }
 ```
 
@@ -219,71 +246,159 @@ Store は設定管理の中心となる型です。
 #### 作成と設定
 
 ```go
-// 新しいストアを作成
-store := jubako.New[AppConfig]()
+package main
 
-// 自動優先度のステップを指定（デフォルト: 10）
-storeWithStep := jubako.New[AppConfig](jubako.WithPriorityStep(100))
+import "github.com/yacchi/jubako"
+
+type AppConfig struct{}
+
+func main() {
+	// 新しいストアを作成
+	store := jubako.New[AppConfig]()
+
+	// 自動優先度のステップを指定（デフォルト: 10）
+	storeWithStep := jubako.New[AppConfig](jubako.WithPriorityStep(100))
+
+	_ = store
+	_ = storeWithStep
+}
 ```
 
 #### レイヤーの追加
 
 ```go
-// 優先度を指定してレイヤーを追加
-err := store.Add(
-    layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
-    jubako.WithPriority(jubako.PriorityDefaults),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/yaml"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source/bytes"
+	"github.com/yacchi/jubako/source/fs"
 )
 
-// 読み取り専用として追加（SetTo による変更を禁止）
-err = store.Add(
-    layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
-    jubako.WithPriority(jubako.PriorityDefaults),
-    jubako.WithReadOnly(),
+type AppConfig struct{}
+
+const (
+	defaultsYAML = ""
+	baseYAML     = ""
+	overrideYAML = ""
 )
 
-// 優先度を省略すると追加順に自動割り当て（0, 10, 20, ...）
-store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
-store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// 優先度を指定してレイヤーを追加
+	err := store.Add(
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityDefaults),
+	)
+
+	// 読み取り専用として追加（SetTo による変更を禁止）
+	err = store.Add(
+		layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityDefaults),
+		jubako.WithReadOnly(),
+	)
+
+	// 優先度を省略すると追加順に自動割り当て（0, 10, 20, ...）
+	err = store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
+	err = store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+
+	_ = err
+}
 ```
 
 #### 読み込みとアクセス
 
 ```go
-// 全レイヤーを読み込み
-err := store.Load(ctx)
+package main
 
-// 設定をリロード
-err = store.Reload(ctx)
+import (
+	"context"
+	"fmt"
 
-// マージ済み設定を取得
-config := store.Get()
-fmt.Println(config.Server.Port)
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct {
+	Server struct {
+		Port int `json:"port"`
+	} `json:"server"`
+}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	// 全レイヤーを読み込み
+	err := store.Load(ctx)
+
+	// 設定をリロード
+	err = store.Reload(ctx)
+
+	// マージ済み設定を取得
+	config := store.Get()
+	fmt.Println(config.Server.Port)
+
+	_ = err
+}
 ```
 
 #### 変更通知
 
 ```go
-// 設定変更をサブスクライブ
-unsubscribe := store.Subscribe(func(cfg AppConfig) {
-    log.Printf("Config changed: %+v", cfg)
-})
-defer unsubscribe()
+package main
+
+import (
+	"log"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// 設定変更をサブスクライブ
+	unsubscribe := store.Subscribe(func(cfg AppConfig) {
+		log.Printf("Config changed: %+v", cfg)
+	})
+	defer unsubscribe()
+}
 ```
 
 #### 値の変更と保存
 
 ```go
-// 特定レイヤーの値を変更（メモリ上）
-err := store.SetTo("user", "/server/port", 9000)
+package main
 
-// 変更があるか確認
-if store.IsDirty() {
-    // 変更された全レイヤーを保存
-    err = store.Save(ctx)
+import (
+	"context"
 
-    // または特定レイヤーのみ保存
-    err = store.SaveLayer(ctx, "user")
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	// 特定レイヤーの値を変更（メモリ上）
+	err := store.SetTo("user", "/server/port", 9000)
+
+	// 変更があるか確認
+	if store.IsDirty() {
+		// 変更された全レイヤーを保存
+		err = store.Save(ctx)
+
+		// または特定レイヤーのみ保存
+		err = store.SaveLayer(ctx, "user")
+	}
+
+	_ = err
 }
 ```
 
@@ -294,47 +409,89 @@ if store.IsDirty() {
 #### GetAt - 単一値の取得
 
 ```go
-rv := store.GetAt("/server/port")
-if rv.Exists {
-    fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
+package main
+
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	rv := store.GetAt("/server/port")
+	if rv.Exists {
+		fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
+	}
 }
 ```
 
 #### GetAllAt - 全レイヤーの値を取得
 
 ```go
-values := store.GetAllAt("/server/port")
-for _, rv := range values {
-    fmt.Printf("port=%v (from layer %s, priority %d)\n",
-        rv.Value, rv.Layer.Name(), rv.Layer.Priority())
-}
+package main
 
-// 最も優先度の高い値を取得
-effective := values.Effective()
-fmt.Printf("effective: %v\n", effective.Value)
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	values := store.GetAllAt("/server/port")
+	for _, rv := range values {
+		fmt.Printf("port=%v (from layer %s, priority %d)\n",
+			rv.Value, rv.Layer.Name(), rv.Layer.Priority())
+	}
+
+	// 最も優先度の高い値を取得
+	effective := values.Effective()
+	fmt.Printf("effective: %v\n", effective.Value)
+}
 ```
 
 #### Walk - 全設定値を走査
 
 ```go
-// 各パスの解決済み値を取得
-store.Walk(func(ctx jubako.WalkContext) bool {
-    rv := ctx.Value()
-    fmt.Printf("%s = %v (from %s)\n", ctx.Path, rv.Value, rv.Layer.Name())
-    return true // 継続
-})
+package main
 
-// 各パスの全レイヤー値を取得（オーバーライドチェーンの分析）
-store.Walk(func(ctx jubako.WalkContext) bool {
-    allValues := ctx.AllValues()
-    if allValues.Len() > 1 {
-        fmt.Printf("%s has values from %d layers:\n", ctx.Path, allValues.Len())
-        for _, rv := range allValues {
-            fmt.Printf("  - %s: %v\n", rv.Layer.Name(), rv.Value)
-        }
-    }
-    return true
-})
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// 各パスの解決済み値を取得
+	store.Walk(func(ctx jubako.WalkContext) bool {
+		rv := ctx.Value()
+		fmt.Printf("%s = %v (from %s)\n", ctx.Path, rv.Value, rv.Layer.Name())
+		return true // 継続
+	})
+
+	// 各パスの全レイヤー値を取得（オーバーライドチェーンの分析）
+	store.Walk(func(ctx jubako.WalkContext) bool {
+		allValues := ctx.AllValues()
+		if allValues.Len() > 1 {
+			fmt.Printf("%s has values from %d layers:\n", ctx.Path, allValues.Len())
+			for _, rv := range allValues {
+				fmt.Printf("  - %s: %v\n", rv.Layer.Name(), rv.Value)
+			}
+		}
+		return true
+	})
+}
 ```
 
 詳しい使用例は [examples/origin-tracking](examples/origin-tracking/) を参照してください。
@@ -342,23 +499,37 @@ store.Walk(func(ctx jubako.WalkContext) bool {
 ### レイヤー情報
 
 ```go
-// 特定レイヤーの情報を取得
-info := store.GetLayerInfo("user")
-if info != nil {
-fmt.Printf("Name: %s\n", info.Name())
-fmt.Printf("Priority: %d\n", info.Priority())
-fmt.Printf("Format: %s\n", info.Format())
-fmt.Printf("Path: %s\n", info.Path()) // ファイルベースの場合
-fmt.Printf("Loaded: %v\n", info.Loaded())
-fmt.Printf("ReadOnly: %v\n", info.ReadOnly())
-fmt.Printf("Writable: %v\n", info.Writable())
-fmt.Printf("Dirty: %v\n", info.Dirty())
-}
+package main
 
-// 全レイヤーを一覧（優先度順）
-for _, info := range store.ListLayers() {
-fmt.Printf("[%d] %s (writable: %v)\n",
-info.Priority(), info.Name(), info.Writable())
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// 特定レイヤーの情報を取得
+	info := store.GetLayerInfo("user")
+	if info != nil {
+		fmt.Printf("Name: %s\n", info.Name())
+		fmt.Printf("Priority: %d\n", info.Priority())
+		fmt.Printf("Format: %s\n", info.Format())
+		fmt.Printf("Path: %s\n", info.Path()) // ファイルベースの場合
+		fmt.Printf("Loaded: %v\n", info.Loaded())
+		fmt.Printf("ReadOnly: %v\n", info.ReadOnly())
+		fmt.Printf("Writable: %v\n", info.Writable())
+		fmt.Printf("Dirty: %v\n", info.Dirty())
+	}
+
+	// 全レイヤーを一覧（優先度順）
+	for _, info := range store.ListLayers() {
+		fmt.Printf("[%d] %s (writable: %v)\n",
+			info.Priority(), info.Name(), info.Writable())
+	}
 }
 ```
 
@@ -374,15 +545,31 @@ AST（抽象構文木）を直接操作することで、変更箇所のみを�
 | フォーマット | パッケージ          | 説明                                     |
 |--------|----------------|----------------------------------------|
 | YAML   | `format/yaml`  | `gopkg.in/yaml.v3` の yaml.Node AST を使用 |
-| TOML   | `format/toml`  | コメント/フォーマットを保持したまま編集・保存可能             |
-| JSONC  | `format/jsonc` | コメント/フォーマットを保持したまま編集・保存可能             |
+| TOML   | `format/toml`  | コメント/フォーマットを保持したまま編集・保存可能              |
+| JSONC  | `format/jsonc` | コメント/フォーマットを保持したまま編集・保存可能              |
 
 ```go
-// YAML（コメント保持）
-store.Add(
-layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()),
-jubako.WithPriority(jubako.PriorityUser),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/yaml"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source/fs"
 )
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// YAML（コメント保持）
+	_ = store.Add(
+		layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityUser),
+	)
+}
+
 ```
 
 フルサポートフォーマットでは、値を変更しても元のフォーマットが維持されます：
@@ -407,11 +594,26 @@ server:
 | JSON   | `format/json` | 標準ライブラリ `encoding/json` を使用 |
 
 ```go
-// JSON（コメント非保持）
-store.Add(
-layer.New("config", fs.New("config.json"), json.NewParser()),
-jubako.WithPriority(jubako.PriorityProject),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/json"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source/fs"
 )
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// JSON（コメント非保持）
+	_ = store.Add(
+		layer.New("config", fs.New("config.json"), json.NewParser()),
+		jubako.WithPriority(jubako.PriorityProject),
+	)
+}
 ```
 
 ### 一覧
@@ -429,13 +631,26 @@ jubako.WithPriority(jubako.PriorityProject),
 環境変数レイヤーは、プレフィックスに一致する環境変数を設定として読み込みます：
 
 ```go
-// APP_ プレフィックスの環境変数を読み込み
-// APP_SERVER_HOST -> /server/host
-// APP_DATABASE_USER -> /database/user
-store.Add(
-env.New("env", "APP_"),
-jubako.WithPriority(jubako.PriorityEnv),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/layer/env"
 )
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// APP_ プレフィックスの環境変数を読み込み
+	// APP_SERVER_HOST -> /server/host
+	// APP_DATABASE_USER -> /database/user
+	_ = store.Add(
+		env.New("env", "APP_"),
+		jubako.WithPriority(jubako.PriorityEnv),
+	)
+}
 ```
 
 **注意**: 環境変数は常に文字列として読み込まれます。数値型のフィールドに環境変数で値を設定する場合は、YAML
@@ -452,57 +667,72 @@ Jubako は拡張可能なアーキテクチャを持っています。独自の�
 Source は設定データの入出力を担当します（フォーマットに依存しない）：
 
 ```go
+package source
+
+import "context"
+
 // source/source.go
 type Source interface {
-// Load はソースから設定データを読み込みます
-Load(ctx context.Context) ([]byte, error)
+	// Load はソースから設定データを読み込みます。
+	Load(ctx context.Context) ([]byte, error)
 
-// Save はデータをソースに書き込みます
-// 保存をサポートしない場合は ErrSaveNotSupported を返します
-Save(ctx context.Context, data []byte) error
+	// Save はデータをソースに書き込みます。
+	// 保存をサポートしない場合は ErrSaveNotSupported を返します。
+	Save(ctx context.Context, data []byte) error
 
-// CanSave は保存をサポートするかを返します
-CanSave() bool
+	// CanSave は保存をサポートするかを返します。
+	CanSave() bool
 }
 ```
 
 **実装例（HTTP ソース）**:
 
 ```go
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+
+	"github.com/yacchi/jubako/source"
+)
+
 type HTTPSource struct {
-url string
+	url string
 }
 
 func NewHTTP(url string) *HTTPSource {
-return &HTTPSource{url: url}
+	return &HTTPSource{url: url}
 }
 
 func (s *HTTPSource) Load(ctx context.Context) ([]byte, error) {
-req, err := http.NewRequestWithContext(ctx, "GET", s.url, nil)
-if err != nil {
-return nil, err
-}
-resp, err := http.DefaultClient.Do(req)
-if err != nil {
-return nil, err
-}
-defer resp.Body.Close()
-return io.ReadAll(resp.Body)
+	req, err := http.NewRequestWithContext(ctx, "GET", s.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func (s *HTTPSource) Save(ctx context.Context, data []byte) error {
-return source.ErrSaveNotSupported
+	return source.ErrSaveNotSupported
 }
 
 func (s *HTTPSource) CanSave() bool {
-return false
+	return false
 }
 
-// 使用例
-store.Add(
-layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.NewParser()),
-jubako.WithPriority(jubako.PriorityDefaults),
-)
+// 使用例:
+//
+//  store.Add(
+//      layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.NewParser()),
+//      jubako.WithPriority(jubako.PriorityDefaults),
+//  )
 ```
 
 ### Parser インターフェース
@@ -510,16 +740,21 @@ jubako.WithPriority(jubako.PriorityDefaults),
 Parser は生のバイト列を Document に変換します：
 
 ```go
+package document
+
+type Document interface{}
+type DocumentFormat string
+
 // document/parser.go
 type Parser interface {
-// Parse はバイト列を Document に変換します
-Parse(data []byte) (Document, error)
+	// Parse はバイト列を Document に変換します。
+	Parse(data []byte) (Document, error)
 
-// Format はこのパーサーが扱うフォーマットを返します
-Format() DocumentFormat
+	// Format はこのパーサーが扱うフォーマットを返します。
+	Format() DocumentFormat
 
-// CanMarshal はコメント保持付きでマーシャル可能かを返します
-CanMarshal() bool
+	// CanMarshal はコメント保持付きでマーシャル可能かを返します。
+	CanMarshal() bool
 }
 ```
 
@@ -528,26 +763,30 @@ CanMarshal() bool
 Document は構造化された設定データへのアクセスを提供します：
 
 ```go
+package document
+
+type DocumentFormat string
+
 // document/document.go
 type Document interface {
-// Get は指定パスの値を取得します（JSON Pointer）
-Get(path string) (any, bool)
+	// Get は指定パスの値を取得します（JSON Pointer）。
+	Get(path string) (any, bool)
 
-// Set は指定パスに値を設定します
-Set(path string, value any) error
+	// Set は指定パスに値を設定します。
+	Set(path string, value any) error
 
-// Delete は指定パスの値を削除します
-Delete(path string) error
+	// Delete は指定パスの値を削除します。
+	Delete(path string) error
 
-// Marshal はドキュメントをバイト列にシリアライズします
-// コメントとフォーマットを可能な限り保持します
-Marshal() ([]byte, error)
+	// Marshal はドキュメントをバイト列にシリアライズします。
+	// コメントとフォーマットを可能な限り保持します。
+	Marshal() ([]byte, error)
 
-// Format はドキュメントのフォーマットを返します
-Format() DocumentFormat
+	// Format はドキュメントのフォーマットを返します。
+	Format() DocumentFormat
 
-// MarshalTestData はテスト用にデータをバイト列に変換します
-MarshalTestData(data map[string]any) ([]byte, error)
+	// MarshalTestData はテスト用にデータをバイト列に変換します。
+	MarshalTestData(data map[string]any) ([]byte, error)
 }
 ```
 
@@ -608,8 +847,10 @@ Document 実装が必要です。
 package yaml
 
 import (
-	"gopkg.in/yaml.v3"
+	"fmt"
+
 	"github.com/yacchi/jubako/document"
+	"gopkg.in/yaml.v3"
 )
 
 // Document は yaml.Node AST をバックエンドとする YAML ドキュメント
@@ -617,20 +858,35 @@ type Document struct {
 	root *yaml.Node // AST を直接保持
 }
 
-// Get は yaml.Node を走査して値を取得
-func (d *Document) Get(path string) (any, bool) {
-	// AST からノードを検索し、値に変換
-}
+var _ document.Document = (*Document)(nil)
 
-// Set は yaml.Node を走査・更新
-func (d *Document) Set(path string, value any) error {
-	// 既存ノードを更新、または新規ノードを作成
-	// コメントは既存ノードに紐づいているため保持される
-}
+// Get は yaml.Node を走査して値を取得します。
+func (d *Document) Get(path string) (any, bool) { return nil, false }
+
+// Set は yaml.Node を走査・更新します。
+func (d *Document) Set(path string, value any) error { return nil }
+
+// Delete は指定パスの値を削除します。
+func (d *Document) Delete(path string) error { return nil }
 
 // Marshal は AST をそのままシリアライズ
 func (d *Document) Marshal() ([]byte, error) {
 	return yaml.Marshal(d.root) // コメント付きで出力
+}
+
+// Format はドキュメントのフォーマットを返します。
+func (d *Document) Format() document.DocumentFormat { return document.FormatYAML }
+
+// MarshalTestData はテスト用にデータを YAML に変換します。
+func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	b, err := yaml.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal test data: %w", err)
+	}
+	return b, nil
 }
 ```
 
@@ -643,22 +899,32 @@ Layer は Source と Parser を組み合わせた設定ソースを表します�
 環境変数レイヤーのように特殊な実装も可能です：
 
 ```go
+package layer
+
+import (
+	"context"
+
+	"github.com/yacchi/jubako/document"
+)
+
+type Name string
+
 // layer/layer.go
 type Layer interface {
-// Name はレイヤーの一意な識別子を返します
-Name() Name
+	// Name はレイヤーの一意な識別子を返します。
+	Name() Name
 
-// Load は設定を読み込み Document を返します
-Load(ctx context.Context) (Document, error)
+	// Load は設定を読み込み Document を返します。
+	Load(ctx context.Context) (document.Document, error)
 
-// Document は読み込み済みの Document を返します
-Document() Document
+	// Document は読み込み済みの Document を返します。
+	Document() document.Document
 
-// Save は Document をソースに保存します
-Save(ctx context.Context) error
+	// Save は Document をソースに保存します。
+	Save(ctx context.Context) error
 
-// CanSave は保存をサポートするかを返します
-CanSave() bool
+	// CanSave は保存をサポートするかを返します。
+	CanSave() bool
 }
 ```
 

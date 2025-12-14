@@ -17,21 +17,21 @@ items, and together they form a complete set - much like how this library manage
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
-  - [Layers](#layers)
-  - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
-  - [Config Struct Definition](#config-struct-definition)
+    - [Layers](#layers)
+    - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
+    - [Config Struct Definition](#config-struct-definition)
 - [API Reference](#api-reference)
-  - [Store[T]](#storet)
-  - [Origin Tracking](#origin-tracking)
-  - [Layer Information](#layer-information)
+    - [Store[T]](#storet)
+    - [Origin Tracking](#origin-tracking)
+    - [Layer Information](#layer-information)
 - [Supported Formats](#supported-formats)
-  - [Environment Variable Layer](#environment-variable-layer)
+    - [Environment Variable Layer](#environment-variable-layer)
 - [Custom Format and Source Implementation](#custom-format-and-source-implementation)
-  - [Source Interface](#source-interface)
-  - [Parser Interface](#parser-interface)
-  - [Document Interface](#document-interface)
-  - [Simple Implementation with mapdoc](#simple-implementation-with-mapdoc)
-  - [Layer Interface](#layer-interface)
+    - [Source Interface](#source-interface)
+    - [Parser Interface](#parser-interface)
+    - [Document Interface](#document-interface)
+    - [Simple Implementation with mapdoc](#simple-implementation-with-mapdoc)
+    - [Layer Interface](#layer-interface)
 - [Comparison with Other Libraries](#comparison-with-other-libraries)
 - [License](#license)
 - [Contributing](#contributing)
@@ -40,7 +40,8 @@ items, and together they form a complete set - much like how this library manage
 
 - **Layer-aware configuration** - Manage multiple config sources with priority ordering
 - **Origin tracking** - Track which layer each configuration value comes from
-- **Format preservation** - AST-based processing updates only changed values (preserves comments, whitespace, indentation, etc.)
+- **Format preservation** - AST-based processing updates only changed values (preserves comments, whitespace,
+  indentation, etc.)
 - **Type-safe access** - Generics-based API with compile-time type checking
 - **Change notifications** - Subscribe to configuration changes
 
@@ -54,7 +55,8 @@ go get github.com/yacchi/jubako
 
 ### Optional format modules
 
-Additional formats are provided as separate Go modules so their dependencies don’t become requirements of the core library:
+Additional formats are provided as separate Go modules so their dependencies don’t become requirements of the core
+library:
 
 ```bash
 go get github.com/yacchi/jubako/format/yaml
@@ -68,30 +70,30 @@ go get github.com/yacchi/jubako/format/jsonc
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
+	"context"
+	"fmt"
+	"log"
 
-    "github.com/yacchi/jubako"
-    "github.com/yacchi/jubako/format/yaml"
-    "github.com/yacchi/jubako/layer"
-    "github.com/yacchi/jubako/layer/env"
-    "github.com/yacchi/jubako/source/bytes"
-    "github.com/yacchi/jubako/source/fs"
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/yaml"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/layer/env"
+	"github.com/yacchi/jubako/source/bytes"
+	"github.com/yacchi/jubako/source/fs"
 )
 
 type AppConfig struct {
-    Server   ServerConfig   `yaml:"server" json:"server"`
-    Database DatabaseConfig `yaml:"database" json:"database"`
+	Server   ServerConfig   `yaml:"server" json:"server"`
+	Database DatabaseConfig `yaml:"database" json:"database"`
 }
 
 type ServerConfig struct {
-    Host string `yaml:"host" json:"host"`
-    Port int    `yaml:"port" json:"port"`
+	Host string `yaml:"host" json:"host"`
+	Port int    `yaml:"port" json:"port"`
 }
 
 type DatabaseConfig struct {
-    URL string `yaml:"url" json:"url"`
+	URL string `yaml:"url" json:"url"`
 }
 
 const defaultsYAML = `
@@ -103,46 +105,54 @@ database:
 `
 
 func main() {
-    ctx := context.Background()
+	ctx := context.Background()
 
-    // Create a new store
-    store := jubako.New[AppConfig]()
+	// Create a new store
+	store := jubako.New[AppConfig]()
 
-    // Add configuration layers (lower priority first)
-    store.Add(
-        layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
-        jubako.WithPriority(jubako.PriorityDefaults),
-    )
+	// Add configuration layers (lower priority first)
+	if err := store.Add(
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityDefaults),
+	); err != nil {
+		log.Fatal(err)
+	}
 
-    store.Add(
-        layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.NewParser()),
-        jubako.WithPriority(jubako.PriorityUser),
-    )
+	if err := store.Add(
+		layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityUser),
+	); err != nil {
+		log.Fatal(err)
+	}
 
-    store.Add(
-        layer.New("project", fs.New(".app.yaml"), yaml.NewParser()),
-        jubako.WithPriority(jubako.PriorityProject),
-    )
+	if err := store.Add(
+		layer.New("project", fs.New(".app.yaml"), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityProject),
+	); err != nil {
+		log.Fatal(err)
+	}
 
-    store.Add(
-        env.New("env", "APP_"),
-        jubako.WithPriority(jubako.PriorityEnv),
-    )
+	if err := store.Add(
+		env.New("env", "APP_"),
+		jubako.WithPriority(jubako.PriorityEnv),
+	); err != nil {
+		log.Fatal(err)
+	}
 
-    // Load and materialize configuration
-    if err := store.Load(ctx); err != nil {
-        log.Fatal(err)
-    }
+	// Load and materialize configuration
+	if err := store.Load(ctx); err != nil {
+		log.Fatal(err)
+	}
 
-    // Get the resolved configuration
-    config := store.Get()
-    fmt.Printf("Server: %s:%d\n", config.Server.Host, config.Server.Port)
+	// Get the resolved configuration
+	config := store.Get()
+	fmt.Printf("Server: %s:%d\n", config.Server.Host, config.Server.Port)
 
-    // Subscribe to changes
-    unsubscribe := store.Subscribe(func(cfg AppConfig) {
-        log.Printf("Config changed: %+v", cfg)
-    })
-    defer unsubscribe()
+	// Subscribe to changes
+	unsubscribe := store.Subscribe(func(cfg AppConfig) {
+		log.Printf("Config changed: %+v", cfg)
+	})
+	defer unsubscribe()
 }
 ```
 
@@ -160,13 +170,17 @@ Each configuration source is represented as a layer with a priority. Higher prio
 priority layers.
 
 ```go
-const (
-    PriorityDefaults LayerPriority = 0  // Lowest - default values
-    PriorityUser     LayerPriority = 10 // User-level config (~/.config)
-    PriorityProject  LayerPriority = 20 // Project-level config (.app.yaml)
-    PriorityEnv      LayerPriority = 30 // Environment variables
-    PriorityFlags    LayerPriority = 40 // Highest - command-line flags
-)
+package main
+
+import "github.com/yacchi/jubako"
+
+func main() {
+	_ = jubako.PriorityDefaults // 0: lowest
+	_ = jubako.PriorityUser     // 10
+	_ = jubako.PriorityProject  // 20
+	_ = jubako.PriorityEnv      // 30
+	_ = jubako.PriorityFlags    // 40: highest
+}
 ```
 
 **Priority Ordering Example:**
@@ -190,17 +204,26 @@ const (
 Jubako uses JSON Pointer for path-based configuration access:
 
 ```go
+package main
+
 import "github.com/yacchi/jubako/jsonptr"
 
-// Build a pointer
-ptr1 := jsonptr.Build("server", "port")     // "/server/port"
-ptr2 := jsonptr.Build("servers", 0, "name") // "/servers/0/name"
+func main() {
+	// Build a pointer
+	ptr1 := jsonptr.Build("server", "port")     // "/server/port"
+	ptr2 := jsonptr.Build("servers", 0, "name") // "/servers/0/name"
 
-// Parse a pointer
-keys, _ := jsonptr.Parse("/server/port")     // ["server", "port"]
+	// Parse a pointer
+	keys, _ := jsonptr.Parse("/server/port") // ["server", "port"]
 
-// Handle special characters
-ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
+	// Handle special characters
+	ptr3 := jsonptr.Build("feature.flags", "on/off") // "/feature.flags/on~1off"
+
+	_ = ptr1
+	_ = ptr2
+	_ = ptr3
+	_ = keys
+}
 ```
 
 **Escaping Rules (RFC 6901):**
@@ -215,14 +238,20 @@ The materialization process uses `encoding/json` internally to decode the merged
 Add format-specific tags such as `yaml` or `toml` as needed.
 
 ```go
+package main
+
 type AppConfig struct {
-    Server   ServerConfig   `yaml:"server" json:"server"`
-    Database DatabaseConfig `yaml:"database" json:"database"`
+	Server   ServerConfig   `yaml:"server" json:"server"`
+	Database DatabaseConfig `yaml:"database" json:"database"`
 }
 
 type ServerConfig struct {
-    Host string `yaml:"host" json:"host"`
-    Port int    `yaml:"port" json:"port"`
+	Host string `yaml:"host" json:"host"`
+	Port int    `yaml:"port" json:"port"`
+}
+
+type DatabaseConfig struct {
+	URL string `yaml:"url" json:"url"`
 }
 ```
 
@@ -235,71 +264,159 @@ Store is the central type for configuration management.
 #### Creation and Options
 
 ```go
-// Create a new store
-store := jubako.New[AppConfig]()
+package main
 
-// Specify auto-priority step (default: 10)
-storeWithStep := jubako.New[AppConfig](jubako.WithPriorityStep(100))
+import "github.com/yacchi/jubako"
+
+type AppConfig struct{}
+
+func main() {
+	// Create a new store
+	store := jubako.New[AppConfig]()
+
+	// Specify auto-priority step (default: 10)
+	storeWithStep := jubako.New[AppConfig](jubako.WithPriorityStep(100))
+
+	_ = store
+	_ = storeWithStep
+}
 ```
 
 #### Adding Layers
 
 ```go
-// Add layer with explicit priority
-err := store.Add(
-    layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
-    jubako.WithPriority(jubako.PriorityDefaults),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/yaml"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source/bytes"
+	"github.com/yacchi/jubako/source/fs"
 )
 
-// Add as read-only (prevents modifications via SetTo)
-err = store.Add(
-    layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
-    jubako.WithPriority(jubako.PriorityDefaults),
-    jubako.WithReadOnly(),
+type AppConfig struct{}
+
+const (
+	defaultsYAML = ""
+	baseYAML     = ""
+	overrideYAML = ""
 )
 
-// Without priority, auto-assigned in order (0, 10, 20, ...)
-store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
-store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// Add layer with explicit priority
+	err := store.Add(
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityDefaults),
+	)
+
+	// Add as read-only (prevents modifications via SetTo)
+	err = store.Add(
+		layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityDefaults),
+		jubako.WithReadOnly(),
+	)
+
+	// Without priority, auto-assigned in order (0, 10, 20, ...)
+	err = store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
+	err = store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+
+	_ = err
+}
 ```
 
 #### Loading and Access
 
 ```go
-// Load all layers
-err := store.Load(ctx)
+package main
 
-// Reload configuration
-err = store.Reload(ctx)
+import (
+	"context"
+	"fmt"
 
-// Get merged configuration
-config := store.Get()
-fmt.Println(config.Server.Port)
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct {
+	Server struct {
+		Port int `json:"port"`
+	} `json:"server"`
+}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	// Load all layers
+	err := store.Load(ctx)
+
+	// Reload configuration
+	err = store.Reload(ctx)
+
+	// Get merged configuration
+	config := store.Get()
+	fmt.Println(config.Server.Port)
+
+	_ = err
+}
 ```
 
 #### Change Notifications
 
 ```go
-// Subscribe to configuration changes
-unsubscribe := store.Subscribe(func(cfg AppConfig) {
-    log.Printf("Config changed: %+v", cfg)
-})
-defer unsubscribe()
+package main
+
+import (
+	"log"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// Subscribe to configuration changes
+	unsubscribe := store.Subscribe(func(cfg AppConfig) {
+		log.Printf("Config changed: %+v", cfg)
+	})
+	defer unsubscribe()
+}
 ```
 
 #### Modifying and Saving
 
 ```go
-// Modify value in specific layer (in memory)
-err := store.SetTo("user", "/server/port", 9000)
+package main
 
-// Check for unsaved changes
-if store.IsDirty() {
-    // Save all modified layers
-    err = store.Save(ctx)
+import (
+	"context"
 
-    // Or save specific layer only
-    err = store.SaveLayer(ctx, "user")
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	// Modify value in specific layer (in memory)
+	err := store.SetTo("user", "/server/port", 9000)
+
+	// Check for unsaved changes
+	if store.IsDirty() {
+		// Save all modified layers
+		err = store.Save(ctx)
+
+		// Or save specific layer only
+		err = store.SaveLayer(ctx, "user")
+	}
+
+	_ = err
 }
 ```
 
@@ -310,47 +427,89 @@ Track which layer each configuration value comes from.
 #### GetAt - Get Single Value
 
 ```go
-rv := store.GetAt("/server/port")
-if rv.Exists {
-    fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
+package main
+
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	rv := store.GetAt("/server/port")
+	if rv.Exists {
+		fmt.Printf("port=%v (from layer %s)\n", rv.Value, rv.Layer.Name())
+	}
 }
 ```
 
 #### GetAllAt - Get Values from All Layers
 
 ```go
-values := store.GetAllAt("/server/port")
-for _, rv := range values {
-    fmt.Printf("port=%v (from layer %s, priority %d)\n",
-        rv.Value, rv.Layer.Name(), rv.Layer.Priority())
-}
+package main
 
-// Get the highest priority value
-effective := values.Effective()
-fmt.Printf("effective: %v\n", effective.Value)
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	values := store.GetAllAt("/server/port")
+	for _, rv := range values {
+		fmt.Printf("port=%v (from layer %s, priority %d)\n",
+			rv.Value, rv.Layer.Name(), rv.Layer.Priority())
+	}
+
+	// Get the highest priority value
+	effective := values.Effective()
+	fmt.Printf("effective: %v\n", effective.Value)
+}
 ```
 
 #### Walk - Traverse All Values
 
 ```go
-// Get resolved value for each path
-store.Walk(func(ctx jubako.WalkContext) bool {
-    rv := ctx.Value()
-    fmt.Printf("%s = %v (from %s)\n", ctx.Path, rv.Value, rv.Layer.Name())
-    return true // continue
-})
+package main
 
-// Get all layer values for each path (analyze override chain)
-store.Walk(func(ctx jubako.WalkContext) bool {
-    allValues := ctx.AllValues()
-    if allValues.Len() > 1 {
-        fmt.Printf("%s has values from %d layers:\n", ctx.Path, allValues.Len())
-        for _, rv := range allValues {
-            fmt.Printf("  - %s: %v\n", rv.Layer.Name(), rv.Value)
-        }
-    }
-    return true
-})
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// Get resolved value for each path
+	store.Walk(func(ctx jubako.WalkContext) bool {
+		rv := ctx.Value()
+		fmt.Printf("%s = %v (from %s)\n", ctx.Path, rv.Value, rv.Layer.Name())
+		return true // continue
+	})
+
+	// Get all layer values for each path (analyze override chain)
+	store.Walk(func(ctx jubako.WalkContext) bool {
+		allValues := ctx.AllValues()
+		if allValues.Len() > 1 {
+			fmt.Printf("%s has values from %d layers:\n", ctx.Path, allValues.Len())
+			for _, rv := range allValues {
+				fmt.Printf("  - %s: %v\n", rv.Layer.Name(), rv.Value)
+			}
+		}
+		return true
+	})
+}
 ```
 
 See [examples/origin-tracking](examples/origin-tracking/) for detailed usage.
@@ -358,23 +517,37 @@ See [examples/origin-tracking](examples/origin-tracking/) for detailed usage.
 ### Layer Information
 
 ```go
-// Get specific layer info
-info := store.GetLayerInfo("user")
-if info != nil {
-    fmt.Printf("Name: %s\n", info.Name())
-    fmt.Printf("Priority: %d\n", info.Priority())
-    fmt.Printf("Format: %s\n", info.Format())
-    fmt.Printf("Path: %s\n", info.Path())       // for file-based layers
-    fmt.Printf("Loaded: %v\n", info.Loaded())
-    fmt.Printf("ReadOnly: %v\n", info.ReadOnly())
-    fmt.Printf("Writable: %v\n", info.Writable())
-    fmt.Printf("Dirty: %v\n", info.Dirty())
-}
+package main
 
-// List all layers (sorted by priority)
-for _, info := range store.ListLayers() {
-    fmt.Printf("[%d] %s (writable: %v)\n",
-        info.Priority(), info.Name(), info.Writable())
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// Get specific layer info
+	info := store.GetLayerInfo("user")
+	if info != nil {
+		fmt.Printf("Name: %s\n", info.Name())
+		fmt.Printf("Priority: %d\n", info.Priority())
+		fmt.Printf("Format: %s\n", info.Format())
+		fmt.Printf("Path: %s\n", info.Path()) // for file-based layers
+		fmt.Printf("Loaded: %v\n", info.Loaded())
+		fmt.Printf("ReadOnly: %v\n", info.ReadOnly())
+		fmt.Printf("Writable: %v\n", info.Writable())
+		fmt.Printf("Dirty: %v\n", info.Dirty())
+	}
+
+	// List all layers (sorted by priority)
+	for _, info := range store.ListLayers() {
+		fmt.Printf("[%d] %s (writable: %v)\n",
+			info.Priority(), info.Name(), info.Writable())
+	}
 }
 ```
 
@@ -387,18 +560,33 @@ Jubako supports two types of format implementations:
 These formats update only changed values while preserving the original format including comments,
 blank lines, indentation, and key ordering.
 
-| Format | Package | Description |
-|--------|---------|-------------|
-| YAML | `format/yaml` | Uses yaml.Node AST from `gopkg.in/yaml.v3` |
-| TOML | `format/toml` | Preserves comments/format via minimal text edits |
-| JSONC | `format/jsonc` | Preserves comments/format via hujson AST |
+| Format | Package        | Description                                      |
+|--------|----------------|--------------------------------------------------|
+| YAML   | `format/yaml`  | Uses yaml.Node AST from `gopkg.in/yaml.v3`       |
+| TOML   | `format/toml`  | Preserves comments/format via minimal text edits |
+| JSONC  | `format/jsonc` | Preserves comments/format via hujson AST         |
 
 ```go
-// YAML (with comment preservation)
-store.Add(
-    layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()),
-    jubako.WithPriority(jubako.PriorityUser),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/yaml"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source/fs"
 )
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// YAML (with comment preservation)
+	_ = store.Add(
+		layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()),
+		jubako.WithPriority(jubako.PriorityUser),
+	)
+}
 ```
 
 With full support formats, the original format is preserved when modifying values:
@@ -418,40 +606,68 @@ server:
 Simple implementations backed by `map[string]any`. Comments are not preserved,
 but reading and writing works correctly.
 
-| Format | Package | Description |
-|--------|---------|-------------|
-| JSON | `format/json` | Uses standard library `encoding/json` |
+| Format | Package       | Description                           |
+|--------|---------------|---------------------------------------|
+| JSON   | `format/json` | Uses standard library `encoding/json` |
 
 ```go
-// JSON (without comment preservation)
-store.Add(
-    layer.New("config", fs.New("config.json"), json.NewParser()),
-    jubako.WithPriority(jubako.PriorityProject),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/format/json"
+	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source/fs"
 )
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// JSON (without comment preservation)
+	_ = store.Add(
+		layer.New("config", fs.New("config.json"), json.NewParser()),
+		jubako.WithPriority(jubako.PriorityProject),
+	)
+}
 ```
 
 ### Summary
 
-| Source | How to add | Format Preservation |
-|--------|------------|---------------------|
-| YAML | `layer.New(..., <source>, yaml.NewParser())` | Yes |
-| TOML | `layer.New(..., <source>, toml.NewParser())` | Yes |
-| JSONC | `layer.New(..., <source>, jsonc.NewParser())` | Yes |
-| JSON | `layer.New(..., <source>, json.NewParser())` | No |
-| Environment variables | `env.New(name, prefix)` | N/A |
+| Source                | How to add                                    | Format Preservation |
+|-----------------------|-----------------------------------------------|---------------------|
+| YAML                  | `layer.New(..., <source>, yaml.NewParser())`  | Yes                 |
+| TOML                  | `layer.New(..., <source>, toml.NewParser())`  | Yes                 |
+| JSONC                 | `layer.New(..., <source>, jsonc.NewParser())` | Yes                 |
+| JSON                  | `layer.New(..., <source>, json.NewParser())`  | No                  |
+| Environment variables | `env.New(name, prefix)`                       | N/A                 |
 
 ### Environment Variable Layer
 
 The environment variable layer reads environment variables with a matching prefix:
 
 ```go
-// Read environment variables with APP_ prefix
-// APP_SERVER_HOST -> /server/host
-// APP_DATABASE_USER -> /database/user
-store.Add(
-    env.New("env", "APP_"),
-    jubako.WithPriority(jubako.PriorityEnv),
+package main
+
+import (
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/layer/env"
 )
+
+type AppConfig struct{}
+
+func main() {
+	store := jubako.New[AppConfig]()
+
+	// Read environment variables with APP_ prefix
+	// APP_SERVER_HOST -> /server/host
+	// APP_DATABASE_USER -> /database/user
+	_ = store.Add(
+		env.New("env", "APP_"),
+		jubako.WithPriority(jubako.PriorityEnv),
+	)
+}
 ```
 
 **Note**: Environment variables are always read as strings. For numeric fields,
@@ -468,57 +684,72 @@ Jubako has an extensible architecture. You can implement custom formats and sour
 Source handles configuration data I/O (format-agnostic):
 
 ```go
+package source
+
+import "context"
+
 // source/source.go
 type Source interface {
-    // Load reads configuration data from the source
-    Load(ctx context.Context) ([]byte, error)
+	// Load reads configuration data from the source.
+	Load(ctx context.Context) ([]byte, error)
 
-    // Save writes data to the source
-    // Returns ErrSaveNotSupported if saving is not supported
-    Save(ctx context.Context, data []byte) error
+	// Save writes data to the source.
+	// Returns ErrSaveNotSupported if saving is not supported.
+	Save(ctx context.Context, data []byte) error
 
-    // CanSave returns whether saving is supported
-    CanSave() bool
+	// CanSave returns whether saving is supported.
+	CanSave() bool
 }
 ```
 
 **Example Implementation (HTTP Source)**:
 
 ```go
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+
+	"github.com/yacchi/jubako/source"
+)
+
 type HTTPSource struct {
-    url string
+	url string
 }
 
 func NewHTTP(url string) *HTTPSource {
-    return &HTTPSource{url: url}
+	return &HTTPSource{url: url}
 }
 
 func (s *HTTPSource) Load(ctx context.Context) ([]byte, error) {
-    req, err := http.NewRequestWithContext(ctx, "GET", s.url, nil)
-    if err != nil {
-        return nil, err
-    }
-    resp, err := http.DefaultClient.Do(req)
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
-    return io.ReadAll(resp.Body)
+	req, err := http.NewRequestWithContext(ctx, "GET", s.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func (s *HTTPSource) Save(ctx context.Context, data []byte) error {
-    return source.ErrSaveNotSupported
+	return source.ErrSaveNotSupported
 }
 
 func (s *HTTPSource) CanSave() bool {
-    return false
+	return false
 }
 
-// Usage
-store.Add(
-    layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.NewParser()),
-    jubako.WithPriority(jubako.PriorityDefaults),
-)
+// Usage:
+//
+//  store.Add(
+//      layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.NewParser()),
+//      jubako.WithPriority(jubako.PriorityDefaults),
+//  )
 ```
 
 ### Parser Interface
@@ -526,16 +757,21 @@ store.Add(
 Parser converts raw bytes into a Document:
 
 ```go
+package document
+
+type Document interface{}
+type DocumentFormat string
+
 // document/parser.go
 type Parser interface {
-    // Parse converts bytes to Document
-    Parse(data []byte) (Document, error)
+	// Parse converts bytes to Document.
+	Parse(data []byte) (Document, error)
 
-    // Format returns the format this parser handles
-    Format() DocumentFormat
+	// Format returns the format this parser handles.
+	Format() DocumentFormat
 
-    // CanMarshal returns whether marshaling with comment preservation is supported
-    CanMarshal() bool
+	// CanMarshal returns whether marshaling with comment preservation is supported.
+	CanMarshal() bool
 }
 ```
 
@@ -544,26 +780,30 @@ type Parser interface {
 Document provides access to structured configuration data:
 
 ```go
+package document
+
+type DocumentFormat string
+
 // document/document.go
 type Document interface {
-    // Get retrieves value at path (JSON Pointer)
-    Get(path string) (any, bool)
+	// Get retrieves value at path (JSON Pointer).
+	Get(path string) (any, bool)
 
-    // Set sets value at path
-    Set(path string, value any) error
+	// Set sets value at path.
+	Set(path string, value any) error
 
-    // Delete removes value at path
-    Delete(path string) error
+	// Delete removes value at path.
+	Delete(path string) error
 
-    // Marshal serializes document to bytes
-    // Preserves comments and formatting where possible
-    Marshal() ([]byte, error)
+	// Marshal serializes document to bytes.
+	// Preserves comments and formatting where possible.
+	Marshal() ([]byte, error)
 
-    // Format returns the document format
-    Format() DocumentFormat
+	// Format returns the document format.
+	Format() DocumentFormat
 
-    // MarshalTestData converts data to bytes for testing
-    MarshalTestData(data map[string]any) ([]byte, error)
+	// MarshalTestData converts data to bytes for testing.
+	MarshalTestData(data map[string]any) ([]byte, error)
 }
 ```
 
@@ -584,11 +824,11 @@ backed by `map[string]any`.
 package json
 
 import (
-    "encoding/json"
-    "fmt"
+	"encoding/json"
+	"fmt"
 
-    "github.com/yacchi/jubako/document"
-    "github.com/yacchi/jubako/mapdoc"
+	"github.com/yacchi/jubako/document"
+	"github.com/yacchi/jubako/mapdoc"
 )
 
 // Document is a JSON document backed by map[string]any
@@ -596,19 +836,19 @@ type Document = mapdoc.Document
 
 // Parse converts JSON data to a document
 func Parse(data []byte) (*Document, error) {
-    var root map[string]any
-    if err := json.Unmarshal(data, &root); err != nil {
-        return nil, fmt.Errorf("failed to parse JSON: %w", err)
-    }
-    return mapdoc.New(
-        document.FormatJSON,
-        mapdoc.WithData(root),
-        mapdoc.WithMarshal(marshalJSON),
-    ), nil
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	return mapdoc.New(
+		document.FormatJSON,
+		mapdoc.WithData(root),
+		mapdoc.WithMarshal(marshalJSON),
+	), nil
 }
 
 func marshalJSON(data map[string]any) ([]byte, error) {
-    return json.MarshalIndent(data, "", "  ")
+	return json.MarshalIndent(data, "", "  ")
 }
 ```
 
@@ -624,29 +864,46 @@ manipulates the format-specific AST.
 package yaml
 
 import (
-    "gopkg.in/yaml.v3"
-    "github.com/yacchi/jubako/document"
+	"fmt"
+
+	"github.com/yacchi/jubako/document"
+	"gopkg.in/yaml.v3"
 )
 
 // Document is a YAML document backed by yaml.Node AST
 type Document struct {
-    root *yaml.Node  // Holds the AST directly
+	root *yaml.Node // Holds the AST directly
 }
 
-// Get traverses yaml.Node to retrieve values
-func (d *Document) Get(path string) (any, bool) {
-    // Search nodes in AST and convert to values
-}
+var _ document.Document = (*Document)(nil)
 
-// Set traverses and updates yaml.Node
-func (d *Document) Set(path string, value any) error {
-    // Update existing nodes or create new ones
-    // Comments are attached to existing nodes, so they're preserved
-}
+// Get traverses yaml.Node to retrieve values.
+func (d *Document) Get(path string) (any, bool) { return nil, false }
 
-// Marshal serializes the AST as-is
+// Set traverses and updates yaml.Node.
+func (d *Document) Set(path string, value any) error { return nil }
+
+// Delete removes the value at path.
+func (d *Document) Delete(path string) error { return nil }
+
+// Marshal serializes the AST as-is.
 func (d *Document) Marshal() ([]byte, error) {
-    return yaml.Marshal(d.root)  // Outputs with comments
+	return yaml.Marshal(d.root) // Outputs with comments
+}
+
+// Format returns the document format.
+func (d *Document) Format() document.DocumentFormat { return document.FormatYAML }
+
+// MarshalTestData generates YAML bytes for tests.
+func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	b, err := yaml.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal test data: %w", err)
+	}
+	return b, nil
 }
 ```
 
@@ -659,22 +916,32 @@ Typically use `SourceParser` created by `layer.New()`, but special implementatio
 like the environment variable layer are also possible:
 
 ```go
+package layer
+
+import (
+	"context"
+
+	"github.com/yacchi/jubako/document"
+)
+
+type Name string
+
 // layer/layer.go
 type Layer interface {
-    // Name returns the unique identifier for this layer
-    Name() Name
+	// Name returns the unique identifier for this layer.
+	Name() Name
 
-    // Load loads configuration and returns a Document
-    Load(ctx context.Context) (Document, error)
+	// Load loads configuration and returns a Document.
+	Load(ctx context.Context) (document.Document, error)
 
-    // Document returns the loaded Document
-    Document() Document
+	// Document returns the loaded Document.
+	Document() document.Document
 
-    // Save persists the Document to the source
-    Save(ctx context.Context) error
+	// Save persists the Document to the source.
+	Save(ctx context.Context) error
 
-    // CanSave returns whether saving is supported
-    CanSave() bool
+	// CanSave returns whether saving is supported.
+	CanSave() bool
 }
 ```
 
@@ -690,12 +957,12 @@ See the following packages for existing implementations:
 
 ## Comparison with Typical Config Libraries
 
-| Feature | Jubako | Typical Libraries |
-|---------|--------|-------------------|
-| Layer tracking | Per-layer preservation | Merged (irreversible) |
-| Origin tracking | Yes | No |
-| Write support | Layer-aware write-back | Limited |
-| Format preservation | Yes (AST-based, supported formats) | No |
+| Feature             | Jubako                             | Typical Libraries     |
+|---------------------|------------------------------------|-----------------------|
+| Layer tracking      | Per-layer preservation             | Merged (irreversible) |
+| Origin tracking     | Yes                                | No                    |
+| Write support       | Layer-aware write-back             | Limited               |
+| Format preservation | Yes (AST-based, supported formats) | No                    |
 
 ## License
 
