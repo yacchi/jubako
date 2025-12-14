@@ -20,6 +20,7 @@ items, and together they form a complete set - much like how this library manage
     - [Layers](#layers)
     - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
     - [Config Struct Definition](#config-struct-definition)
+    - [Path Remapping (jubako tag)](#path-remapping-jubako-tag)
 - [API Reference](#api-reference)
     - [Store[T]](#storet)
     - [Origin Tracking](#origin-tracking)
@@ -161,6 +162,7 @@ For complete working examples, see the [examples/](examples/) directory:
 - [basic](examples/basic/) - Basic usage (adding layers, loading, modifying, saving)
 - [env-override](examples/env-override/) - Environment variable overrides
 - [origin-tracking](examples/origin-tracking/) - Detailed origin tracking features
+- [path-remapping](examples/path-remapping/) - Path remapping with jubako struct tags
 
 ## Core Concepts
 
@@ -254,6 +256,145 @@ type DatabaseConfig struct {
 	URL string `yaml:"url" json:"url"`
 }
 ```
+
+### Path Remapping (jubako tag)
+
+The `jubako` struct tag enables remapping nested configuration paths to flat struct fields.
+This is useful when configuration files use nested structures for readability,
+but your application prefers flat structs for convenience.
+
+#### Path Types
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| Absolute | `/server/host` | Resolved from root (starts with `/`) |
+| Relative | `connection/host` | Resolved from current context |
+| Relative (explicit) | `./connection/host` | Same as above, explicit syntax |
+
+#### Basic Usage
+
+```go
+package main
+
+// Config file structure (nested for readability):
+//   server:
+//     http:
+//       read_timeout: 30
+//       write_timeout: 60
+//
+// Go struct (flat for convenience):
+type ServerConfig struct {
+	Host         string `json:"host" jubako:"/server/host"`
+	Port         int    `json:"port" jubako:"/server/port"`
+	ReadTimeout  int    `json:"read_timeout" jubako:"/server/http/read_timeout"`
+	WriteTimeout int    `json:"write_timeout" jubako:"/server/http/write_timeout"`
+	// Skip field from remapping
+	Internal     string `json:"internal" jubako:"-"`
+}
+```
+
+#### Slice Elements with Relative Paths
+
+When struct elements are inside a slice, use relative paths (no leading `/`) to resolve
+from each element's context:
+
+```go
+package main
+
+// Config file structure:
+//   defaults:
+//     timeout: 30
+//   nodes:
+//     - connection:
+//         host: node1.example.com
+//         port: 5432
+//     - connection:
+//         host: node2.example.com
+//         port: 5433
+
+type Node struct {
+	// Relative paths - resolved from each slice element
+	Host string `json:"host" jubako:"connection/host"`
+	Port int    `json:"port" jubako:"connection/port"`
+	// Absolute path - resolved from root (shared across all elements)
+	DefaultTimeout int `json:"default_timeout" jubako:"/defaults/timeout"`
+}
+
+type ClusterConfig struct {
+	Nodes []Node `json:"nodes"`
+}
+```
+
+#### Map Values with Relative Paths
+
+Same pattern works for map values:
+
+```go
+package main
+
+// Config file structure:
+//   defaults:
+//     retries: 3
+//   services:
+//     api:
+//       settings:
+//         endpoint: https://api.example.com
+//     web:
+//       settings:
+//         endpoint: https://web.example.com
+
+type ServiceConfig struct {
+	// Relative path - resolved from each map value
+	Endpoint string `json:"endpoint" jubako:"settings/endpoint"`
+	// Absolute path - resolved from root
+	DefaultRetries int `json:"default_retries" jubako:"/defaults/retries"`
+}
+
+type Config struct {
+	Services map[string]ServiceConfig `json:"services"`
+}
+```
+
+#### Inspecting the Mapping Table
+
+You can inspect the mapping table for debugging:
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/yacchi/jubako"
+)
+
+type Node struct {
+	Host           string `json:"host" jubako:"connection/host"`
+	Port           int    `json:"port" jubako:"connection/port"`
+	DefaultTimeout int    `json:"default_timeout" jubako:"/defaults/timeout"`
+}
+
+type ClusterConfig struct {
+	Nodes []Node `json:"nodes"`
+}
+
+func main() {
+	store := jubako.New[ClusterConfig]()
+
+	// Check if struct has any jubako mappings
+	if store.HasMappings() {
+		fmt.Println(store.MappingTable())
+	}
+}
+
+// Output:
+// nodes[]: (slice element)
+//   host <- ./connection/host (relative)
+//   port <- ./connection/port (relative)
+//   default_timeout <- /defaults/timeout
+```
+
+See [examples/path-remapping](examples/path-remapping/) for a complete working example.
 
 ## API Reference
 

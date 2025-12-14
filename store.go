@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 
+	"github.com/yacchi/jubako/decoder"
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/layer"
 )
@@ -164,6 +166,7 @@ type StoreOption func(*storeOptions)
 // storeOptions holds the options for New.
 type storeOptions struct {
 	priorityStep int
+	decoder      MapDecoder
 }
 
 // defaultPriorityStep is the default step size for auto-assigned priorities.
@@ -177,6 +180,22 @@ const defaultPriorityStep = 10
 func WithPriorityStep(step int) StoreOption {
 	return func(o *storeOptions) {
 		o.priorityStep = step
+	}
+}
+
+// WithDecoder sets a custom map decoder for the Store.
+// The decoder is used to convert the merged map[string]any into the target struct.
+// The default decoder uses JSON marshal/unmarshal.
+//
+// This allows using alternative decoders like mapstructure for more flexible decoding.
+//
+// Example:
+//
+//	// Using mapstructure (hypothetical)
+//	store := jubako.New[AppConfig](jubako.WithDecoder(mapstructureDecoder))
+func WithDecoder(decoder MapDecoder) StoreOption {
+	return func(o *storeOptions) {
+		o.decoder = decoder
 	}
 }
 
@@ -204,6 +223,14 @@ type Store[T any] struct {
 	// priorityStep is the step size for auto-assigned priorities
 	priorityStep int
 
+	// decoder is the function used to decode map[string]any into T
+	// If nil, the default JSON-based decoder is used
+	decoder MapDecoder
+
+	// mappingTable holds pre-computed path mappings from jubako struct tags
+	// Built once at initialization, used during every materialize
+	mappingTable *MappingTable
+
 	// mu protects layers, origins, and subscribers
 	mu sync.RWMutex
 }
@@ -213,6 +240,7 @@ type Store[T any] struct {
 //
 // Options:
 //   - WithPriorityStep(step): Set the step size for auto-assigned priorities (default: 10)
+//   - WithDecoder(decoder): Set a custom map decoder (default: JSON marshal/unmarshal)
 //
 // Example:
 //
@@ -222,12 +250,18 @@ func New[T any](opts ...StoreOption) *Store[T] {
 	// Apply options
 	options := storeOptions{
 		priorityStep: defaultPriorityStep,
+		// Set default decoder if not provided
+		decoder: decoder.JSON,
 	}
 	for _, opt := range opts {
 		opt(&options)
 	}
 
 	var zero T
+
+	// Build mapping table from T's struct tags at initialization time
+	table := buildMappingTable(reflect.TypeOf(zero))
+
 	return &Store[T]{
 		layers:       make([]*layerEntry, 0),
 		resolved:     NewCell(zero),
@@ -235,6 +269,8 @@ func New[T any](opts ...StoreOption) *Store[T] {
 		subscribers:  make([]subscriber[T], 0),
 		nextSubID:    1,
 		priorityStep: options.priorityStep,
+		decoder:      options.decoder,
+		mappingTable: table,
 	}
 }
 
@@ -797,4 +833,28 @@ func (s *Store[T]) IsDirty() bool {
 		}
 	}
 	return false
+}
+
+// MappingTable returns the path mapping table derived from jubako struct tags.
+// Returns nil if the type T has no jubako tag mappings.
+// The returned MappingTable can be inspected programmatically or printed via String().
+//
+// Example:
+//
+//	store := jubako.New[ServerConfig]()
+//	table := store.MappingTable()
+//	if table != nil {
+//	    for _, m := range table.Mappings {
+//	        fmt.Printf("%s <- %s\n", m.FieldKey, m.SourcePath)
+//	    }
+//	}
+//	// Or simply print:
+//	fmt.Println(table)
+func (s *Store[T]) MappingTable() *MappingTable {
+	return s.mappingTable
+}
+
+// HasMappings returns true if the struct type T has any jubako tag mappings defined.
+func (s *Store[T]) HasMappings() bool {
+	return s.mappingTable != nil && !s.mappingTable.IsEmpty()
 }

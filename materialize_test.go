@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/yacchi/jubako/decoder"
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/layer/mapdata"
 )
@@ -373,15 +374,15 @@ func TestDecodeMap(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var result testAppConfig
-			err := decodeMap(tt.input, &result)
+			err := decoder.JSON(tt.input, &result)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("decodeMap() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("decoder.JSON() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if !tt.wantErr && !reflect.DeepEqual(result, tt.want) {
-				t.Errorf("decodeMap() = %+v, want %+v", result, tt.want)
+				t.Errorf("decoder.JSON() = %+v, want %+v", result, tt.want)
 			}
 		})
 	}

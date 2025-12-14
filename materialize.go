@@ -1,7 +1,6 @@
 package jubako
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/yacchi/jubako/jsonptr"
@@ -59,8 +58,12 @@ func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
 	}
 
 	// Convert merged map to type T
+	// 1. Apply path remapping based on pre-built mapping table (from jubako struct tags)
+	remapped := applyMappings(merged, s.mappingTable)
+
+	// 2. Decode using the configured decoder
 	var result T
-	if err := decodeMap(merged, &result); err != nil {
+	if err := s.decoder(remapped, &result); err != nil {
 		var zero T
 		return zero, nil, fmt.Errorf("failed to decode merged config: %w", err)
 	}
@@ -177,20 +180,3 @@ func walkSliceForOrigins(prefix string, data []any, entry *layerEntry, o *origin
 	}
 }
 
-// decodeMap decodes a map[string]any into a typed struct using JSON as an intermediate.
-// This is a simple approach that leverages existing JSON decoding logic.
-// For better performance in the future, we could use a more direct reflection-based approach.
-func decodeMap(m map[string]any, target any) error {
-	// Marshal to JSON
-	data, err := json.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("failed to marshal map: %w", err)
-	}
-
-	// Unmarshal to target type
-	if err := json.Unmarshal(data, target); err != nil {
-		return fmt.Errorf("failed to unmarshal to target type: %w", err)
-	}
-
-	return nil
-}
