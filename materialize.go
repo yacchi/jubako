@@ -3,6 +3,7 @@ package jubako
 import (
 	"fmt"
 
+	"github.com/yacchi/jubako/container"
 	"github.com/yacchi/jubako/jsonptr"
 )
 
@@ -12,7 +13,7 @@ import (
 //
 // The merging process:
 // 1. Sort layers by priority (lowest first)
-// 2. Merge each layer's document into a single map, tracking origins
+// 2. Merge each layer's data into a single map, tracking origins
 // 3. Unmarshal the merged map into the configuration type T
 // 4. Update the resolved Cell with the new value
 // 5. Notify all subscribers
@@ -32,29 +33,15 @@ func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
 	// Layers are already sorted by priority (lowest first)
 	merged := make(map[string]any)
 	for _, entry := range s.layers {
-		doc := entry.layer.Document()
-		if doc == nil {
+		if entry.data == nil {
 			continue // Skip layers that haven't been loaded
 		}
 
-		// Get the entire document as a value
-		value, ok := doc.Get("")
-		if !ok {
-			continue
-		}
-
-		// Merge this layer's data into the accumulated map
-		layerMap, ok := value.(map[string]any)
-		if !ok {
-			var zero T
-			return zero, nil, fmt.Errorf("layer %q: document root is not a map", entry.layer.Name())
-		}
-
 		// Walk the map to track origins for all paths
-		walkMapForOrigins("", layerMap, entry, s.origins)
+		walkMapForOrigins("", entry.data, entry, s.origins)
 
 		// Deep merge the layer map into merged
-		deepMerge(merged, layerMap)
+		deepMerge(merged, entry.data)
 	}
 
 	// Convert merged map to type T
@@ -84,13 +71,13 @@ func mergeValues(dst, src any) any {
 
 	if dstIsMap && srcIsMap {
 		// Both are maps - merge recursively into a copy
-		result := deepCopyValue(dstMap).(map[string]any)
+		result := container.DeepCopyValue(dstMap).(map[string]any)
 		deepMerge(result, srcMap)
 		return result
 	}
 
 	// Not both maps - src replaces dst
-	return deepCopyValue(src)
+	return container.DeepCopyValue(src)
 }
 
 // deepMerge performs a deep merge of src into dst.
@@ -103,7 +90,7 @@ func deepMerge(dst, src map[string]any) {
 
 		if !exists {
 			// Key doesn't exist in dst - deep copy it
-			dst[key] = deepCopyValue(srcValue)
+			dst[key] = container.DeepCopyValue(srcValue)
 			continue
 		}
 
@@ -116,30 +103,8 @@ func deepMerge(dst, src map[string]any) {
 			deepMerge(dstMap, srcMap)
 		} else {
 			// One or both are not maps - replace with deep copy
-			dst[key] = deepCopyValue(srcValue)
+			dst[key] = container.DeepCopyValue(srcValue)
 		}
-	}
-}
-
-// deepCopyValue creates a deep copy of a value.
-// Maps and slices are recursively copied to avoid shared references.
-func deepCopyValue(v any) any {
-	switch val := v.(type) {
-	case map[string]any:
-		copied := make(map[string]any, len(val))
-		for k, v := range val {
-			copied[k] = deepCopyValue(v)
-		}
-		return copied
-	case []any:
-		copied := make([]any, len(val))
-		for i, v := range val {
-			copied[i] = deepCopyValue(v)
-		}
-		return copied
-	default:
-		// Primitive types (string, int, float, bool, nil) are immutable
-		return v
 	}
 }
 

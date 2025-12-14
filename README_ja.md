@@ -25,9 +25,7 @@
     - [環境変数レイヤー](#環境変数レイヤー)
 - [独自フォーマット・ソースの作成](#独自フォーマットソースの作成)
     - [Source インターフェース](#source-インターフェース)
-    - [Parser インターフェース](#parser-インターフェース)
     - [Document インターフェース](#document-インターフェース)
-    - [mapdoc による簡易実装](#mapdoc-による簡易実装)
     - [Layer インターフェース](#layer-インターフェース)
 - [一般的な設定ライブラリとの比較](#一般的な設定ライブラリとの比較)
 - [ライセンス](#ライセンス)
@@ -97,21 +95,21 @@ func main() {
 
 	// 設定レイヤーを追加（優先度の低い順）
 	if err := store.Add(
-		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := store.Add(
-		layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.NewParser()),
+		layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityUser),
 	); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := store.Add(
-		layer.New("project", fs.New(".app.yaml"), yaml.NewParser()),
+		layer.New("project", fs.New(".app.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityProject),
 	); err != nil {
 		log.Fatal(err)
@@ -441,20 +439,20 @@ func main() {
 
 	// 優先度を指定してレイヤーを追加
 	err := store.Add(
-		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	)
 
 	// 読み取り専用として追加（SetTo による変更を禁止）
 	err = store.Add(
-		layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
+		layer.New("system", fs.New("/etc/app/config.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 		jubako.WithReadOnly(),
 	)
 
 	// 優先度を省略すると追加順に自動割り当て（0, 10, 20, ...）
-	err = store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
-	err = store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+	err = store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.New()))
+	err = store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 
 	_ = err
 }
@@ -716,7 +714,7 @@ func main() {
 
 	// YAML（コメント保持）
 	_ = store.Add(
-		layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()),
+		layer.New("user", fs.New("~/.config/app.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityUser),
 	)
 }
@@ -735,10 +733,9 @@ server:
 # コメント・空行・インデントはそのまま維持される
 ```
 
-### 簡易サポートフォーマット（mapdoc ベース）
+### 簡易サポートフォーマット（フォーマット非保持）
 
-`map[string]any` をバックエンドとする簡易実装です。フォーマットは保持されませんが、
-読み書きは正常に動作します。
+読み書きは可能ですが、コメントや整形は保持されません（保存時に出力は再生成されます）。
 
 | フォーマット | パッケージ         | 説明                          |
 |--------|---------------|-----------------------------|
@@ -761,7 +758,7 @@ func main() {
 
 	// JSON（コメント非保持）
 	_ = store.Add(
-		layer.New("config", fs.New("config.json"), json.NewParser()),
+		layer.New("config", fs.New("config.json"), json.New()),
 		jubako.WithPriority(jubako.PriorityProject),
 	)
 }
@@ -771,10 +768,10 @@ func main() {
 
 | Source                | 追加方法                                          | Format 保持 |
 |-----------------------|-----------------------------------------------|-----------|
-| YAML                  | `layer.New(..., <source>, yaml.NewParser())`  | Yes       |
-| TOML                  | `layer.New(..., <source>, toml.NewParser())`  | Yes       |
-| JSONC                 | `layer.New(..., <source>, jsonc.NewParser())` | Yes       |
-| JSON                  | `layer.New(..., <source>, json.NewParser())`  | No        |
+| YAML                  | `layer.New(..., <source>, yaml.New())`        | Yes       |
+| TOML                  | `layer.New(..., <source>, toml.New())`        | Yes       |
+| JSONC                 | `layer.New(..., <source>, jsonc.New())`       | Yes       |
+| JSON                  | `layer.New(..., <source>, json.New())`        | No        |
 | Environment variables | `env.New(name, prefix)`                       | N/A       |
 
 ### 環境変数レイヤー
@@ -827,9 +824,10 @@ type Source interface {
 	// Load はソースから設定データを読み込みます。
 	Load(ctx context.Context) ([]byte, error)
 
-	// Save はデータをソースに書き込みます。
+	// Save は楽観ロック（optimistic locking）で書き込みます。
 	// 保存をサポートしない場合は ErrSaveNotSupported を返します。
-	Save(ctx context.Context, data []byte) error
+	// 外部で更新されていた場合は ErrSourceModified を返します。
+	Save(ctx context.Context, updateFunc UpdateFunc) error
 
 	// CanSave は保存をサポートするかを返します。
 	CanSave() bool
@@ -870,7 +868,7 @@ func (s *HTTPSource) Load(ctx context.Context) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func (s *HTTPSource) Save(ctx context.Context, data []byte) error {
+func (s *HTTPSource) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	return source.ErrSaveNotSupported
 }
 
@@ -881,37 +879,15 @@ func (s *HTTPSource) CanSave() bool {
 // 使用例:
 //
 //  store.Add(
-//      layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.NewParser()),
+//      layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.New()),
 //      jubako.WithPriority(jubako.PriorityDefaults),
 //  )
 ```
 
-### Parser インターフェース
-
-Parser は生のバイト列を Document に変換します：
-
-```go
-package document
-
-type Document interface{}
-type DocumentFormat string
-
-// document/parser.go
-type Parser interface {
-	// Parse はバイト列を Document に変換します。
-	Parse(data []byte) (Document, error)
-
-	// Format はこのパーサーが扱うフォーマットを返します。
-	Format() DocumentFormat
-
-	// CanMarshal はコメント保持付きでマーシャル可能かを返します。
-	CanMarshal() bool
-}
-```
-
 ### Document インターフェース
 
-Document は構造化された設定データへのアクセスを提供します：
+Document は状態を持たないフォーマットハンドラです。バイト列を `map[string]any` にパースし、
+`document.JSONPatchSet` を適用して新しいバイト列を生成できます（フォーマットによりコメント保持可）。
 
 ```go
 package document
@@ -920,134 +896,34 @@ type DocumentFormat string
 
 // document/document.go
 type Document interface {
-	// Get は指定パスの値を取得します（JSON Pointer）。
-	Get(path string) (any, bool)
+	// Get は data をパースして map[string]any を返します。
+	// data が nil/空の場合は空の map を返します。
+	Get(data []byte) (map[string]any, error)
 
-	// Set は指定パスに値を設定します。
-	Set(path string, value any) error
-
-	// Delete は指定パスの値を削除します。
-	Delete(path string) error
-
-	// Marshal はドキュメントをバイト列にシリアライズします。
-	// コメントとフォーマットを可能な限り保持します。
-	Marshal() ([]byte, error)
+	// Apply は changeset を data に適用し、新しいバイト列を返します。
+	// コメント保持対応フォーマットでは changeset を用いて元のコメント/整形を維持できます。
+	Apply(data []byte, changeset JSONPatchSet) ([]byte, error)
 
 	// Format はドキュメントのフォーマットを返します。
 	Format() DocumentFormat
+
+	// CanApply は Apply がコメント/整形を保持できるかを返します。
+	CanApply() bool
 
 	// MarshalTestData はテスト用にデータをバイト列に変換します。
 	MarshalTestData(data map[string]any) ([]byte, error)
 }
 ```
 
-### フォーマット実装の2つのアプローチ
-
-独自フォーマットを実装する際は、2つのアプローチがあります：
-
-#### 1. mapdoc による簡易実装
-
-コメント保持が不要な場合、`mapdoc` パッケージを使用して簡単にフォーマットを追加できます。
-`map[string]any` をバックエンドとし、JSON Pointer によるパスアクセスや中間マップの自動作成など、
-基本的な機能がすべて提供されます。
-
-**JSON フォーマットの実装例（約 30 行）**:
-
-```go
-// format/json/document.go
-package json
-
-import (
-	"encoding/json"
-	"fmt"
-
-	"github.com/yacchi/jubako/document"
-	"github.com/yacchi/jubako/mapdoc"
-)
-
-// Document は map[string]any をバックエンドとする JSON ドキュメント
-type Document = mapdoc.Document
-
-// Parse は JSON データをドキュメントに変換します
-func Parse(data []byte) (*Document, error) {
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-	return mapdoc.New(
-		document.FormatJSON,
-		mapdoc.WithData(root),
-		mapdoc.WithMarshal(marshalJSON),
-	), nil
-}
-
-func marshalJSON(data map[string]any) ([]byte, error) {
-	return json.MarshalIndent(data, "", "  ")
-}
-```
-
-#### 2. AST ベースのフルサポート実装
-
-コメントやフォーマットを保持する必要がある場合、フォーマット固有の AST を直接操作する
-Document 実装が必要です。
-
-**YAML フォーマットの実装概要**:
-
-```go
-// format/yaml/document.go
-package yaml
-
-import (
-	"fmt"
-
-	"github.com/yacchi/jubako/document"
-	"gopkg.in/yaml.v3"
-)
-
-// Document は yaml.Node AST をバックエンドとする YAML ドキュメント
-type Document struct {
-	root *yaml.Node // AST を直接保持
-}
-
-var _ document.Document = (*Document)(nil)
-
-// Get は yaml.Node を走査して値を取得します。
-func (d *Document) Get(path string) (any, bool) { return nil, false }
-
-// Set は yaml.Node を走査・更新します。
-func (d *Document) Set(path string, value any) error { return nil }
-
-// Delete は指定パスの値を削除します。
-func (d *Document) Delete(path string) error { return nil }
-
-// Marshal は AST をそのままシリアライズ
-func (d *Document) Marshal() ([]byte, error) {
-	return yaml.Marshal(d.root) // コメント付きで出力
-}
-
-// Format はドキュメントのフォーマットを返します。
-func (d *Document) Format() document.DocumentFormat { return document.FormatYAML }
-
-// MarshalTestData はテスト用にデータを YAML に変換します。
-func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
-	if data == nil {
-		data = map[string]any{}
-	}
-	b, err := yaml.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal test data: %w", err)
-	}
-	return b, nil
-}
-```
-
-TOML や JSONC も同様に、各ライブラリの AST を操作することでコメント保持を実現します。
+独自フォーマットを追加する場合は `document.Document` を実装します。コメント保持が不要なら
+`Get()` で `map[string]any` にパースし、`Apply()` で `changeset` を適用して再マーシャルする実装が最も簡単です。
+コメント保持が必要な場合は、フォーマット固有の AST を使って `Apply()` を実装します。
 
 ### Layer インターフェース
 
-Layer は Source と Parser を組み合わせた設定ソースを表します。
-通常は `layer.New()` で作成される `SourceParser` 実装を使用しますが、
-環境変数レイヤーのように特殊な実装も可能です：
+Layer は `map[string]any` として設定を読み込む設定ソースを表します。
+標準の実装は `layer.New(name, source, document)` で作成される `layer.FileLayer` です。
+また、環境変数レイヤーのように特殊な実装も可能です：
 
 ```go
 package layer
@@ -1065,14 +941,11 @@ type Layer interface {
 	// Name はレイヤーの一意な識別子を返します。
 	Name() Name
 
-	// Load は設定を読み込み Document を返します。
-	Load(ctx context.Context) (document.Document, error)
+	// Load は設定を読み込み map[string]any を返します。
+	Load(ctx context.Context) (map[string]any, error)
 
-	// Document は読み込み済みの Document を返します。
-	Document() document.Document
-
-	// Save は Document をソースに保存します。
-	Save(ctx context.Context) error
+	// Save は changeset をソースに保存します（楽観ロック）。
+	Save(ctx context.Context, changeset document.JSONPatchSet) error
 
 	// CanSave は保存をサポートするかを返します。
 	CanSave() bool
@@ -1083,10 +956,10 @@ type Layer interface {
 
 - `source/bytes` - Byte slice source（read-only）
 - `source/fs` - File system source
-- `format/yaml` - YAML parser（AST-based, format preservation）
-- `format/toml` - TOML parser（separate module, comment + format preservation）
-- `format/jsonc` - JSONC parser（separate module, comment + format preservation）
-- `format/json` - JSON parser（mapdoc-based, simple）
+- `format/yaml` - YAML document（separate module, comment preservation）
+- `format/toml` - TOML document（separate module, comment + format preservation）
+- `format/jsonc` - JSONC document（separate module, comment + format preservation）
+- `format/json` - JSON document（standard library, no comment preservation）
 - `layer/env` - Environment variable layer
 
 ## 一般的な設定ライブラリとの比較

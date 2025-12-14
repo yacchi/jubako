@@ -102,17 +102,17 @@ func main() {
 
 	// Add layers with different priorities
 	store.Add(
-		layer.New("defaults", bytes.FromString(defaultConfig), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultConfig), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	)
 
 	store.Add(
-		layer.New("user", bytes.FromString(userConfig), yaml.NewParser()),
+		layer.New("user", bytes.FromString(userConfig), yaml.New()),
 		jubako.WithPriority(jubako.PriorityUser),
 	)
 
 	store.Add(
-		layer.New("project", bytes.FromString(projectConfig), yaml.NewParser()),
+		layer.New("project", bytes.FromString(projectConfig), yaml.New()),
 		jubako.WithPriority(jubako.PriorityProject),
 	)
 

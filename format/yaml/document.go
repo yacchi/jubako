@@ -1,9 +1,9 @@
-// Package yaml provides a YAML implementation of the document.Document interface
-// and loaders for YAML configuration sources.
-// It preserves comments and formatting by operating on yaml.Node AST.
+// Package yaml provides a YAML implementation of the document.Document interface.
+// It preserves comments and formatting by operating on yaml.Node AST during Apply.
 package yaml
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 
@@ -13,40 +13,20 @@ import (
 )
 
 // Document is a Document implementation for YAML format.
-// It preserves comments and formatting by operating on yaml.Node AST.
-type Document struct {
-	root *yaml.Node
-}
+// It is stateless - parsing and serialization happen on demand.
+type Document struct{}
 
 // Ensure Document implements document.Document interface.
 var _ document.Document = (*Document)(nil)
 
-// New creates a new empty YAML document.
-func New() *Document {
-	return &Document{
-		root: &yaml.Node{
-			Kind: yaml.DocumentNode,
-			Content: []*yaml.Node{
-				{Kind: yaml.MappingNode},
-			},
-		},
-	}
-}
-
-// Parse parses YAML data into a Document.
+// New returns a YAML Document.
 //
-// Empty/nil input is treated as an empty document.
-func Parse(data []byte) (document.Document, error) {
-	if len(data) == 0 {
-		return New(), nil
-	}
-
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-
-	return &Document{root: &root}, nil
+// Example:
+//
+//	src := fs.New("~/.config/app.yaml")
+//	layer.New("user", src, yaml.New())
+func New() *Document {
+	return &Document{}
 }
 
 // Format returns the document format.
@@ -54,87 +34,119 @@ func (d *Document) Format() document.DocumentFormat {
 	return document.FormatYAML
 }
 
-// Marshal serializes the document to YAML bytes.
-func (d *Document) Marshal() ([]byte, error) {
-	data, err := yaml.Marshal(d.root)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal YAML: %w", err)
+// Get parses data bytes and returns content as map[string]any.
+// Returns empty map if data is nil or empty.
+func (d *Document) Get(data []byte) (map[string]any, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]any{}, nil
 	}
-	return data, nil
+
+	var result map[string]any
+	if err := yaml.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	if result == nil {
+		return map[string]any{}, nil
+	}
+
+	return result, nil
 }
 
-// Get retrieves the value at the specified JSON Pointer path.
-func (d *Document) Get(path string) (any, bool) {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return nil, false
+// Apply applies changeset to data bytes and returns new bytes.
+// If changeset is provided: parses data, applies changeset operations
+// to preserve comments, then marshals the result.
+// If changeset is empty: parses and re-marshals data directly.
+func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, error) {
+	// If no changeset, parse and re-marshal (for format consistency)
+	if changeset.IsEmpty() {
+		var m map[string]any
+		if len(bytes.TrimSpace(data)) > 0 {
+			if err := yaml.Unmarshal(data, &m); err != nil {
+				return nil, fmt.Errorf("failed to parse YAML: %w", err)
+			}
+		}
+		if m == nil {
+			m = map[string]any{}
+		}
+		return yaml.Marshal(m)
 	}
 
-	node := d.getRootMapping()
-	if node == nil {
-		return nil, false
+	// Parse existing data to preserve comments
+	var root *yaml.Node
+	if len(bytes.TrimSpace(data)) > 0 {
+		var node yaml.Node
+		if err := yaml.Unmarshal(data, &node); err != nil {
+			// If parse fails, create new document
+			root = &yaml.Node{
+				Kind: yaml.DocumentNode,
+				Content: []*yaml.Node{
+					{Kind: yaml.MappingNode},
+				},
+			}
+		} else {
+			root = &node
+		}
+	} else {
+		// No existing data, create new document structure
+		root = &yaml.Node{
+			Kind: yaml.DocumentNode,
+			Content: []*yaml.Node{
+				{Kind: yaml.MappingNode},
+			},
+		}
 	}
 
-	// Empty path refers to the whole document
-	if len(keys) == 0 {
-		return nodeToValue(node), true
+	// Get the root mapping node
+	rootMapping := getRootMapping(root)
+	if rootMapping == nil {
+		// Fallback: parse data and marshal
+		var m map[string]any
+		if len(bytes.TrimSpace(data)) > 0 {
+			yaml.Unmarshal(data, &m)
+		}
+		if m == nil {
+			m = map[string]any{}
+		}
+		return yaml.Marshal(m)
 	}
 
-	found := findNode(node, keys)
-	if found == nil {
-		return nil, false
+	// Apply each patch operation
+	for _, patch := range changeset {
+		keys, err := jsonptr.Parse(patch.Path)
+		if err != nil {
+			continue // Skip invalid paths
+		}
+
+		switch patch.Op {
+		case document.PatchOpAdd, document.PatchOpReplace:
+			if len(keys) > 0 {
+				setNodeValue(rootMapping, keys, patch.Value)
+			}
+		case document.PatchOpRemove:
+			if len(keys) > 0 {
+				deleteNode(rootMapping, keys)
+			}
+		}
 	}
 
-	return nodeToValue(found), true
+	return yaml.Marshal(root)
 }
 
-// Set sets the value at the specified JSON Pointer path.
-func (d *Document) Set(path string, value any) error {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-
-	// Empty path is not allowed for Set
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: path, Reason: "cannot set root document"}
-	}
-
-	root := d.getRootMapping()
-	if root == nil {
-		return fmt.Errorf("document root is not a mapping")
-	}
-
-	return setNodeValue(root, keys, value)
-}
-
-// Delete removes the value at the specified JSON Pointer path.
-func (d *Document) Delete(path string) error {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-
-	// Empty path is not allowed for Delete
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: path, Reason: "cannot delete root document"}
-	}
-
-	root := d.getRootMapping()
-	if root == nil {
-		return fmt.Errorf("document root is not a mapping")
-	}
-
-	return deleteNode(root, keys)
+// MarshalTestData generates YAML bytes from the given data structure.
+// YAML supports all common data structures, so this never returns
+// UnsupportedStructureError.
+func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
+	return yaml.Marshal(data)
 }
 
 // getRootMapping returns the root mapping node.
 // YAML documents have a DocumentNode wrapper around the actual content.
-func (d *Document) getRootMapping() *yaml.Node {
-	if d.root.Kind == yaml.DocumentNode && len(d.root.Content) > 0 {
-		return d.root.Content[0]
+func getRootMapping(root *yaml.Node) *yaml.Node {
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		return root.Content[0]
 	}
-	return d.root
+	return root
 }
 
 // resolveAlias returns the actual node if the given node is an alias, otherwise returns the node itself.
@@ -148,55 +160,8 @@ func resolveAlias(node *yaml.Node) *yaml.Node {
 	return node
 }
 
-// findNode navigates to a node using a key path.
-// Supports both object keys (strings) and array indices (numeric strings).
-// Alias nodes are automatically resolved to their target.
-func findNode(node *yaml.Node, keys []string) *yaml.Node {
-	node = resolveAlias(node)
-	if node == nil || len(keys) == 0 {
-		return node
-	}
-
-	key := keys[0]
-	remaining := keys[1:]
-
-	switch node.Kind {
-	case yaml.MappingNode:
-		// Search for the key in the mapping
-		for i := 0; i < len(node.Content)-1; i += 2 {
-			keyNode := node.Content[i]
-			valueNode := resolveAlias(node.Content[i+1])
-
-			if keyNode.Value == key {
-				if len(remaining) == 0 {
-					return valueNode
-				}
-				return findNode(valueNode, remaining)
-			}
-		}
-		return nil
-
-	case yaml.SequenceNode:
-		// Parse key as array index
-		index, err := strconv.Atoi(key)
-		if err != nil || index < 0 || index >= len(node.Content) {
-			return nil
-		}
-
-		valueNode := resolveAlias(node.Content[index])
-		if len(remaining) == 0 {
-			return valueNode
-		}
-		return findNode(valueNode, remaining)
-
-	default:
-		return nil
-	}
-}
-
 // setNodeValue sets a value at the specified key path.
 // Creates intermediate nodes if they don't exist.
-// Note: Setting values through alias nodes modifies the original anchor target.
 func setNodeValue(node *yaml.Node, keys []string, value any) error {
 	node = resolveAlias(node)
 	if node == nil || len(keys) == 0 {
@@ -317,8 +282,6 @@ func setNodeValue(node *yaml.Node, keys []string, value any) error {
 }
 
 // deleteNode removes a node at the specified key path.
-// Note: Alias nodes are resolved when navigating deeper, but deleting an alias
-// removes the alias itself, not the anchor target.
 func deleteNode(node *yaml.Node, keys []string) error {
 	node = resolveAlias(node)
 	if node == nil || len(keys) == 0 {
@@ -446,87 +409,6 @@ func valueToNode(value any) *yaml.Node {
 	return node
 }
 
-// nodeToValue converts a yaml.Node to a Go value.
-// Alias nodes are automatically resolved to their target value.
-func nodeToValue(node *yaml.Node) any {
-	node = resolveAlias(node)
-	if node == nil {
-		return nil
-	}
-
-	switch node.Kind {
-	case yaml.ScalarNode:
-		return parseScalarValue(node)
-
-	case yaml.MappingNode:
-		m := make(map[string]any)
-		for i := 0; i < len(node.Content)-1; i += 2 {
-			key := node.Content[i].Value
-			m[key] = nodeToValue(node.Content[i+1])
-		}
-		return m
-
-	case yaml.SequenceNode:
-		s := make([]any, len(node.Content))
-		for i, n := range node.Content {
-			s[i] = nodeToValue(n)
-		}
-		return s
-
-	default:
-		return nil
-	}
-}
-
-// parseScalarValue parses a scalar node value.
-// It distinguishes between:
-//   - null (explicit null or empty untagged value): returns nil
-//   - empty string (!!str tag with empty value): returns ""
-//   - zero values (0, false, etc.): returns the actual zero value
-func parseScalarValue(node *yaml.Node) any {
-	// Explicit null tag
-	if node.Tag == "!!null" {
-		return nil
-	}
-
-	// Explicit string tag - always return as string (including empty string)
-	if node.Tag == "!!str" {
-		return node.Value
-	}
-
-	// Empty value without tag is treated as null (YAML spec behavior)
-	if node.Value == "" && node.Tag == "" {
-		return nil
-	}
-
-	switch node.Tag {
-	case "!!bool":
-		b, _ := strconv.ParseBool(node.Value)
-		return b
-
-	case "!!int":
-		i, _ := strconv.ParseInt(node.Value, 10, 64)
-		return int(i)
-
-	case "!!float":
-		f, _ := strconv.ParseFloat(node.Value, 64)
-		return f
-
-	default:
-		// Type tag not present - auto-detect
-		if b, err := strconv.ParseBool(node.Value); err == nil {
-			return b
-		}
-		if i, err := strconv.ParseInt(node.Value, 10, 64); err == nil {
-			return int(i)
-		}
-		if f, err := strconv.ParseFloat(node.Value, 64); err == nil {
-			return f
-		}
-		return node.Value
-	}
-}
-
 // nodeKindString returns a human-readable string for a node kind.
 func nodeKindString(kind yaml.Kind) string {
 	switch kind {
@@ -543,11 +425,4 @@ func nodeKindString(kind yaml.Kind) string {
 	default:
 		return "unknown"
 	}
-}
-
-// MarshalTestData generates YAML bytes from the given data structure.
-// YAML supports all common data structures, so this never returns
-// UnsupportedStructureError.
-func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
-	return yaml.Marshal(data)
 }

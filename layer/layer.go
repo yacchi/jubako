@@ -24,100 +24,97 @@ type Layer interface {
 	// Name returns the unique identifier for this layer.
 	Name() Name
 
-	// Load reads configuration from the source and returns a Document.
+	// Load reads configuration from the source and returns data as map[string]any.
 	// The context can be used for cancellation and timeouts.
-	Load(ctx context.Context) (document.Document, error)
+	Load(ctx context.Context) (map[string]any, error)
 
-	// Document returns the last loaded Document, or nil if not loaded.
-	Document() document.Document
-
-	// Save persists the current document back to the source.
+	// Save persists data back to the source using optimistic locking.
+	// The changeset contains modifications since last load (for comment-preserving formats).
 	// Returns source.ErrSaveNotSupported if the layer doesn't support saving.
-	Save(ctx context.Context) error
+	// Returns source.ErrSourceModified if the source was modified externally.
+	Save(ctx context.Context, changeset document.JSONPatchSet) error
 
 	// CanSave returns true if this layer supports saving.
-	// This checks both the source and the document format.
 	CanSave() bool
 }
 
-// SourceParser is a Layer implementation that combines a Source and Parser.
+// FileLayer is a Layer implementation that combines a Source and Document.
 // This is the standard layer type for file-based configurations (YAML, TOML, JSON, etc.).
-type SourceParser struct {
+type FileLayer struct {
 	name   Name
 	source source.Source
-	parser document.Parser
 	doc    document.Document
 }
 
-// Ensure SourceParser implements Layer interface.
-var _ Layer = (*SourceParser)(nil)
+// FormatProvider is an optional interface that layers can implement
+// to expose their document format. This is useful for introspection
+// and debugging purposes.
+type FormatProvider interface {
+	Format() document.DocumentFormat
+}
 
-// New creates a new SourceParser layer with the given Source and Parser.
+// Ensure FileLayer implements Layer interface.
+var _ Layer = (*FileLayer)(nil)
+
+// Ensure FileLayer implements FormatProvider interface.
+var _ FormatProvider = (*FileLayer)(nil)
+
+// New creates a new FileLayer with the given Source and Document.
+// The Document is stateless and handles format parsing/serialization.
 //
 // Example:
 //
-//	layer := layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser())
-func New(name Name, src source.Source, parser document.Parser) *SourceParser {
-	return &SourceParser{
+//	src := fs.New("~/.config/app.yaml")
+//	layer := layer.New("user", src, yaml.New())
+func New(name Name, src source.Source, doc document.Document) *FileLayer {
+	return &FileLayer{
 		name:   name,
 		source: src,
-		parser: parser,
+		doc:    doc,
 	}
 }
 
 // Name returns the layer's name.
-func (l *SourceParser) Name() Name {
+func (l *FileLayer) Name() Name {
 	return l.name
 }
 
-// Load reads from the source and parses into a Document.
-func (l *SourceParser) Load(ctx context.Context) (document.Document, error) {
+// Load reads from the source via Document.Get and returns data as map[string]any.
+func (l *FileLayer) Load(ctx context.Context) (map[string]any, error) {
 	data, err := l.source.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	doc, err := l.parser.Parse(data)
-	if err != nil {
-		return nil, err
-	}
-
-	l.doc = doc
-	return doc, nil
+	return l.doc.Get(data)
 }
 
-// Save marshals the document and saves to the source.
+// Save generates output via Document.Apply and saves to the source.
+// Uses optimistic locking to detect external modifications.
 // Returns source.ErrSaveNotSupported if the source doesn't support saving.
-func (l *SourceParser) Save(ctx context.Context) error {
-	if l.doc == nil {
-		return nil
-	}
-
-	data, err := l.doc.Marshal()
-	if err != nil {
-		return err
-	}
-
-	return l.source.Save(ctx, data)
-}
-
-// Document returns the last loaded document.
-func (l *SourceParser) Document() document.Document {
-	return l.doc
+// Returns source.ErrSourceModified if the source was modified externally.
+func (l *FileLayer) Save(ctx context.Context, changeset document.JSONPatchSet) error {
+	return l.source.Save(ctx, func(current []byte) ([]byte, error) {
+		return l.doc.Apply(current, changeset)
+	})
 }
 
 // Source returns the underlying source (useful for accessing source-specific methods).
-func (l *SourceParser) Source() source.Source {
+func (l *FileLayer) Source() source.Source {
 	return l.source
 }
 
-// Parser returns the underlying parser.
-func (l *SourceParser) Parser() document.Parser {
-	return l.parser
+// Document returns the underlying document.
+func (l *FileLayer) Document() document.Document {
+	return l.doc
 }
 
 // CanSave returns true if this layer supports saving.
-// Both the source and parser must support saving/marshaling for this to return true.
-func (l *SourceParser) CanSave() bool {
-	return l.source.CanSave() && l.parser.CanMarshal()
+// The source must support saving for this to return true.
+func (l *FileLayer) CanSave() bool {
+	return l.source.CanSave()
+}
+
+// Format returns the document format (e.g., "yaml", "toml", "json").
+func (l *FileLayer) Format() document.DocumentFormat {
+	return l.doc.Format()
 }

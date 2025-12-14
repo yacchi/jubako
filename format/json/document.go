@@ -1,8 +1,8 @@
 // Package json provides a standard library (encoding/json) implementation of
 // the document.Document interface.
 //
-// This implementation is map-backed (map[string]any) and is intended for cases
-// where comment/format preservation is not required.
+// This implementation does not preserve comments (standard JSON doesn't support them).
+// Apply applies changeset operations in-memory and marshals the result.
 package json
 
 import (
@@ -11,56 +11,73 @@ import (
 	"fmt"
 
 	"github.com/yacchi/jubako/document"
-	"github.com/yacchi/jubako/mapdoc"
 )
 
-// Document is a JSON document implementation backed by map[string]any.
-type Document = mapdoc.Document
+// Document is a JSON document implementation.
+// It is stateless - parsing and serialization happen on demand.
+type Document struct{}
 
-// New creates a new empty JSON document.
+// Ensure Document implements document.Document interface.
+var _ document.Document = (*Document)(nil)
+
+// New returns a JSON Document.
+//
+// Example:
+//
+//	src := fs.New("~/.config/app.json")
+//	layer.New("user", src, json.New())
 func New() *Document {
-	return newDocument(make(map[string]any))
+	return &Document{}
 }
 
-// Parse parses JSON data into a Document.
-//
-// The root value must be a JSON object. Empty/whitespace input is treated as an
-// empty object.
-func Parse(data []byte) (document.Document, error) {
+// Format returns the document format.
+func (d *Document) Format() document.DocumentFormat {
+	return document.FormatJSON
+}
+
+// Get parses data bytes and returns content as map[string]any.
+// Returns empty map if data is nil or empty.
+func (d *Document) Get(data []byte) (map[string]any, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
-		return New(), nil
+		return map[string]any{}, nil
 	}
 
-	var root any
-	if err := json.Unmarshal(trimmed, &root); err != nil {
+	var result map[string]any
+	if err := json.Unmarshal(trimmed, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	if root == nil {
-		return New(), nil
+	if result == nil {
+		return map[string]any{}, nil
 	}
 
-	obj, ok := root.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("failed to parse JSON: root must be an object, got %T", root)
+	return result, nil
+}
+
+// Apply applies changeset to data bytes and returns new bytes.
+// JSON does not support comments, so the changeset is applied in-memory
+// and the result is marshaled directly.
+func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, error) {
+	m, err := d.Get(data)
+	if err != nil {
+		return nil, err
 	}
 
-	return newDocument(obj), nil
-}
+	changeset.ApplyTo(m)
 
-func newDocument(data map[string]any) *Document {
-	return mapdoc.New(
-		document.FormatJSON,
-		mapdoc.WithData(data),
-		mapdoc.WithMarshal(marshalJSON),
-	)
-}
-
-func marshalJSON(data map[string]any) ([]byte, error) {
-	b, err := json.MarshalIndent(data, "", "  ")
+	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	return append(b, '\n'), nil
+}
+
+// MarshalTestData generates JSON bytes for testing.
+func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal JSON test data: %w", err)
 	}
 	return append(b, '\n'), nil
 }

@@ -1,5 +1,7 @@
 package jubako
 
+import "github.com/yacchi/jubako/jsonptr"
+
 // ResolvedValue represents a configuration value with its origin information.
 // It provides the value, whether the key exists, and which layer it came from.
 //
@@ -40,16 +42,15 @@ func (rv ResolvedValue) HasValue() bool {
 }
 
 // newResolvedValue creates a ResolvedValue for the given path from a layer entry.
-// Returns an unset ResolvedValue if the entry is nil, document is nil, or path doesn't exist.
+// Returns an unset ResolvedValue if the entry is nil, data is nil, or path doesn't exist.
 func newResolvedValue(entry *layerEntry, path string) ResolvedValue {
 	if entry == nil {
 		return ResolvedValue{}
 	}
-	doc := entry.layer.Document()
-	if doc == nil {
+	if entry.data == nil {
 		return ResolvedValue{}
 	}
-	value, ok := doc.Get(path)
+	value, ok := jsonptr.GetPath(entry.data, path)
 	if !ok {
 		return ResolvedValue{}
 	}

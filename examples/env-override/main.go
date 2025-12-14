@@ -105,7 +105,7 @@ func main() {
 
 	// Layer 1: Default values (lowest priority)
 	err := store.Add(
-		layer.New("defaults", bytes.FromString(defaultConfig), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultConfig), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	)
 	if err != nil {

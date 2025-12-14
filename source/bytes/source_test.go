@@ -67,7 +67,9 @@ func TestSource_CanSave(t *testing.T) {
 func TestSource_Save_ReturnsError(t *testing.T) {
 	src := New([]byte("data"))
 
-	err := src.Save(context.Background(), []byte("new data"))
+	err := src.Save(context.Background(), func(current []byte) ([]byte, error) {
+		return []byte("new data"), nil
+	})
 	if err == nil {
 		t.Error("Save() should return an error")
 	}

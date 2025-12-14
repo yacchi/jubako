@@ -2,7 +2,7 @@
 //
 // It preserves comments and formatting by performing minimal text edits on the
 // original TOML bytes (using github.com/pelletier/go-toml/v2/unstable for parsing).
-// When no modifications are performed, Marshal returns the input bytes verbatim.
+// When no modifications are performed, Apply returns the input bytes verbatim.
 package toml
 
 import (
@@ -14,35 +14,23 @@ import (
 	"github.com/pelletier/go-toml/v2/unstable"
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
-	"github.com/yacchi/jubako/mapdoc"
 )
 
-// Document is a TOML document implementation backed by the raw TOML bytes.
-type Document struct {
-	src []byte
-}
+// Document is a TOML document implementation.
+// It is stateless - parsing and serialization happen on demand.
+type Document struct{}
 
 // Ensure Document implements document.Document interface.
 var _ document.Document = (*Document)(nil)
 
-// New creates a new empty TOML document.
-func New() *Document {
-	return &Document{src: nil}
-}
-
-// Parse parses TOML bytes into a Document.
+// New returns a TOML Document.
 //
-// Empty/whitespace input is treated as an empty document.
-func Parse(data []byte) (document.Document, error) {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return New(), nil
-	}
-	// Validate by decoding once.
-	var root map[string]any
-	if err := toml.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse TOML: %w", err)
-	}
-	return &Document{src: append([]byte(nil), data...)}, nil
+// Example:
+//
+//	src := fs.New("~/.config/app.toml")
+//	layer.New("user", src, toml.New())
+func New() *Document {
+	return &Document{}
 }
 
 // Format returns the document format.
@@ -50,125 +38,104 @@ func (d *Document) Format() document.DocumentFormat {
 	return document.FormatTOML
 }
 
-// Marshal returns the current TOML bytes, preserving comments and formatting.
-func (d *Document) Marshal() ([]byte, error) {
-	return append([]byte(nil), d.src...), nil
+// Get parses data bytes and returns content as map[string]any.
+// Returns empty map if data is nil or empty.
+func (d *Document) Get(data []byte) (map[string]any, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]any{}, nil
+	}
+
+	var result map[string]any
+	if err := toml.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse TOML: %w", err)
+	}
+
+	if result == nil {
+		return map[string]any{}, nil
+	}
+
+	return result, nil
 }
 
-// Get retrieves the value at the specified JSON Pointer path.
-func (d *Document) Get(path string) (any, bool) {
-	if path == "" || path == "/" {
-		root, err := d.decodeRoot()
-		if err != nil {
-			return nil, false
+// Apply applies changeset to data bytes and returns new bytes.
+// If changeset is provided: parses data, applies changeset operations
+// using minimal text edits to preserve comments, then returns the result.
+// If changeset is empty: marshals parsed data directly.
+func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, error) {
+	// Parse data to check for nil values
+	var current map[string]any
+	if len(bytes.TrimSpace(data)) > 0 {
+		if err := toml.Unmarshal(data, &current); err != nil {
+			return nil, fmt.Errorf("failed to parse TOML: %w", err)
 		}
-		return root, true
+	}
+	if current == nil {
+		current = map[string]any{}
 	}
 
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return nil, false
+	// Check for nil values in current (TOML doesn't support null)
+	if err := checkNilMap("", current); err != nil {
+		return nil, err
 	}
 
-	root, err := d.decodeRoot()
-	if err != nil {
-		return nil, false
-	}
-	return mapdoc.Get(root, keys)
-}
-
-// Set sets the value at the specified JSON Pointer path, creating intermediate tables as needed.
-func (d *Document) Set(path string, value any) error {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: path, Reason: "cannot set root document"}
+	// If no changeset, just marshal current data directly
+	if changeset.IsEmpty() {
+		return toml.Marshal(current)
 	}
 
-	if containsNil(value) {
-		return document.UnsupportedAt(path, "TOML does not support null values")
+	// Use original data as source for comment preservation
+	src := data
+	if len(bytes.TrimSpace(src)) == 0 {
+		// No existing data, just marshal after applying patches in-memory
+		for _, patch := range changeset {
+			keys, err := jsonptr.Parse(patch.Path)
+			if err != nil || len(keys) == 0 {
+				continue
+			}
+			switch patch.Op {
+			case document.PatchOpAdd, document.PatchOpReplace:
+				if containsNil(patch.Value) {
+					continue
+				}
+				jsonptr.SetPath(current, patch.Path, patch.Value)
+			case document.PatchOpRemove:
+				jsonptr.DeletePath(current, patch.Path)
+			}
+		}
+		return toml.Marshal(current)
 	}
 
-	// If the path contains an array index segment, update the owning array value
-	// and write it back as a single TOML value.
-	if firstIdx := firstArrayIndex(keys); firstIdx >= 0 {
-		if firstIdx == 0 {
-			return &document.InvalidPathError{Path: path, Reason: "path cannot start with an array index"}
-		}
-		containerKeys := keys[:firstIdx]
-		relativeKeys := keys[firstIdx:]
-
-		root, err := d.decodeRoot()
-		if err != nil {
-			return err
+	// Apply each patch operation
+	var err error
+	for _, patch := range changeset {
+		keys, parseErr := jsonptr.Parse(patch.Path)
+		if parseErr != nil {
+			continue // Skip invalid paths
 		}
 
-		// Ensure array exists at container path.
-		if _, ok := getAny(root, containerKeys); !ok {
-			setAny(root, containerKeys, []any{})
-		}
-		arrAny, ok := getAny(root, containerKeys)
-		if !ok {
-			return &document.PathNotFoundError{Path: path}
-		}
-		arr, ok := arrAny.([]any)
-		if !ok {
-			return &document.TypeMismatchError{Path: buildPointer(containerKeys), Expected: "array", Actual: fmt.Sprintf("%T", arrAny)}
+		if len(keys) == 0 {
+			continue // Skip root path operations
 		}
 
-		updated, err := setAnyInArray(arr, relativeKeys, value)
-		if err != nil {
-			return err
+		switch patch.Op {
+		case document.PatchOpAdd, document.PatchOpReplace:
+			if containsNil(patch.Value) {
+				continue // TOML doesn't support null
+			}
+			src, err = applySet(src, keys, patch.Value)
+			if err != nil {
+				// If operation fails, continue with remaining patches
+				continue
+			}
+		case document.PatchOpRemove:
+			src, err = applyDelete(src, keys)
+			if err != nil {
+				continue
+			}
 		}
-		setAny(root, containerKeys, updated)
-		return d.setNonIndexed(containerKeys, updated)
 	}
 
-	return d.setNonIndexed(keys, value)
-}
-
-// Delete removes the value at the specified JSON Pointer path.
-func (d *Document) Delete(path string) error {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: path, Reason: "cannot delete root document"}
-	}
-
-	// Array element removal: update the owning array value and write back.
-	if firstIdx := firstArrayIndex(keys); firstIdx >= 0 {
-		if firstIdx == 0 {
-			return &document.InvalidPathError{Path: path, Reason: "path cannot start with an array index"}
-		}
-		containerKeys := keys[:firstIdx]
-		relativeKeys := keys[firstIdx:]
-
-		root, err := d.decodeRoot()
-		if err != nil {
-			return err
-		}
-		arrAny, ok := getAny(root, containerKeys)
-		if !ok {
-			return nil
-		}
-		arr, ok := arrAny.([]any)
-		if !ok {
-			return &document.TypeMismatchError{Path: buildPointer(containerKeys), Expected: "array", Actual: fmt.Sprintf("%T", arrAny)}
-		}
-
-		updated, err := deleteAnyInArray(arr, relativeKeys)
-		if err != nil {
-			return err
-		}
-		setAny(root, containerKeys, updated)
-		return d.setNonIndexed(containerKeys, updated)
-	}
-
-	return d.deleteNonIndexed(keys)
+	return src, nil
 }
 
 // MarshalTestData generates TOML bytes (without comment preservation requirements) for testing.
@@ -180,32 +147,70 @@ func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal TOML test data: %w", err)
 	}
-	// go-toml doesn't guarantee trailing newline; keep as-is.
 	return b, nil
 }
 
-func (d *Document) decodeRoot() (map[string]any, error) {
-	if len(bytes.TrimSpace(d.src)) == 0 {
-		return map[string]any{}, nil
-	}
-	var root map[string]any
-	if err := toml.Unmarshal(d.src, &root); err != nil {
-		return nil, fmt.Errorf("failed to decode TOML: %w", err)
-	}
-	if root == nil {
-		return map[string]any{}, nil
-	}
-	return root, nil
-}
-
-func (d *Document) setNonIndexed(keys []string, value any) error {
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: "", Reason: "cannot set root document"}
-	}
+// applySet applies a set operation to the source bytes.
+func applySet(src []byte, keys []string, value any) ([]byte, error) {
 	for _, k := range keys {
 		if isArrayIndex(k) {
-			return &document.InvalidPathError{Path: buildPointer(keys), Reason: "internal error: indexed path passed to setNonIndexed"}
+			return applySetWithArray(src, keys, value)
 		}
+	}
+
+	return applySetNonIndexed(src, keys, value)
+}
+
+// applySetWithArray handles set operations that involve array indices.
+func applySetWithArray(src []byte, keys []string, value any) ([]byte, error) {
+	firstIdx := firstArrayIndex(keys)
+	if firstIdx < 0 {
+		return applySetNonIndexed(src, keys, value)
+	}
+	if firstIdx == 0 {
+		return nil, &document.InvalidPathError{Path: buildPointer(keys), Reason: "path cannot start with an array index"}
+	}
+
+	containerKeys := keys[:firstIdx]
+	relativeKeys := keys[firstIdx:]
+
+	// Decode current data
+	var root map[string]any
+	if len(bytes.TrimSpace(src)) > 0 {
+		if err := toml.Unmarshal(src, &root); err != nil {
+			return nil, err
+		}
+	}
+	if root == nil {
+		root = make(map[string]any)
+	}
+
+	// Ensure array exists at container path
+	if _, ok := getAny(root, containerKeys); !ok {
+		setAny(root, containerKeys, []any{})
+	}
+	arrAny, ok := getAny(root, containerKeys)
+	if !ok {
+		return nil, &document.PathNotFoundError{Path: buildPointer(keys)}
+	}
+	arr, ok := arrAny.([]any)
+	if !ok {
+		return nil, &document.TypeMismatchError{Path: buildPointer(containerKeys), Expected: "array", Actual: fmt.Sprintf("%T", arrAny)}
+	}
+
+	updated, err := setAnyInArray(arr, relativeKeys, value)
+	if err != nil {
+		return nil, err
+	}
+	setAny(root, containerKeys, updated)
+
+	return applySetNonIndexed(src, containerKeys, updated)
+}
+
+// applySetNonIndexed applies a set operation without array indices.
+func applySetNonIndexed(src []byte, keys []string, value any) ([]byte, error) {
+	if len(keys) == 0 {
+		return nil, &document.InvalidPathError{Path: "", Reason: "cannot set root document"}
 	}
 
 	tablePath := keys[:len(keys)-1]
@@ -213,55 +218,101 @@ func (d *Document) setNonIndexed(keys []string, value any) error {
 
 	newValue, err := formatTOMLValue(value)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	idx, err := buildIndex(d.src)
+	idx, err := buildIndex(src)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	fullPath := append(append([]string(nil), tablePath...), leafKey)
 	if kv, ok := idx.kvByPath[strings.Join(fullPath, "\x00")]; ok {
-		d.src = replaceBytes(d.src, kv.valueStart, kv.valueEnd, []byte(newValue))
-		return nil
+		return replaceBytes(src, kv.valueStart, kv.valueEnd, []byte(newValue)), nil
 	}
 
-	insertPos, err := idx.ensureSectionEnd(tablePath, &d.src)
+	insertPos, err := idx.ensureSectionEnd(tablePath, &src)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	line := []byte(formatKey(leafKey) + " = " + newValue + "\n")
-	d.src = insertBytes(d.src, insertPos, ensureLeadingNewline(d.src, insertPos, line))
-	return nil
+	return insertBytes(src, insertPos, ensureLeadingNewline(src, insertPos, line)), nil
 }
 
-func (d *Document) deleteNonIndexed(keys []string) error {
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: "", Reason: "cannot delete root document"}
-	}
+// applyDelete applies a delete operation to the source bytes.
+func applyDelete(src []byte, keys []string) ([]byte, error) {
 	for _, k := range keys {
 		if isArrayIndex(k) {
-			return &document.InvalidPathError{Path: buildPointer(keys), Reason: "internal error: indexed path passed to deleteNonIndexed"}
+			return applyDeleteWithArray(src, keys)
 		}
+	}
+
+	return applyDeleteNonIndexed(src, keys)
+}
+
+// applyDeleteWithArray handles delete operations that involve array indices.
+func applyDeleteWithArray(src []byte, keys []string) ([]byte, error) {
+	firstIdx := firstArrayIndex(keys)
+	if firstIdx < 0 {
+		return applyDeleteNonIndexed(src, keys)
+	}
+	if firstIdx == 0 {
+		return nil, &document.InvalidPathError{Path: buildPointer(keys), Reason: "path cannot start with an array index"}
+	}
+
+	containerKeys := keys[:firstIdx]
+	relativeKeys := keys[firstIdx:]
+
+	// Decode current data
+	var root map[string]any
+	if len(bytes.TrimSpace(src)) > 0 {
+		if err := toml.Unmarshal(src, &root); err != nil {
+			return nil, err
+		}
+	}
+	if root == nil {
+		return src, nil
+	}
+
+	arrAny, ok := getAny(root, containerKeys)
+	if !ok {
+		return src, nil
+	}
+	arr, ok := arrAny.([]any)
+	if !ok {
+		return nil, &document.TypeMismatchError{Path: buildPointer(containerKeys), Expected: "array", Actual: fmt.Sprintf("%T", arrAny)}
+	}
+
+	updated, err := deleteAnyInArray(arr, relativeKeys)
+	if err != nil {
+		return nil, err
+	}
+	setAny(root, containerKeys, updated)
+
+	return applySetNonIndexed(src, containerKeys, updated)
+}
+
+// applyDeleteNonIndexed applies a delete operation without array indices.
+func applyDeleteNonIndexed(src []byte, keys []string) ([]byte, error) {
+	if len(keys) == 0 {
+		return nil, &document.InvalidPathError{Path: "", Reason: "cannot delete root document"}
 	}
 
 	tablePath := keys[:len(keys)-1]
 	leafKey := keys[len(keys)-1]
 	fullPath := append(append([]string(nil), tablePath...), leafKey)
 
-	idx, err := buildIndex(d.src)
+	idx, err := buildIndex(src)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	kv, ok := idx.kvByPath[strings.Join(fullPath, "\x00")]
 	if !ok {
-		return nil
+		return src, nil
 	}
-	d.src = replaceBytes(d.src, kv.lineStart, kv.lineEnd, nil)
-	return nil
+	return replaceBytes(src, kv.lineStart, kv.lineEnd, nil), nil
 }
 
 type kvInfo struct {
@@ -323,8 +374,6 @@ func buildIndex(src []byte) (*index, error) {
 	}
 
 	// Compute section end offsets.
-	// Root section is implicit: start at 0, ends at first header (or EOF).
-	// Each section ends at the start of the next header (or EOF).
 	for i := range idx.sections {
 		start := idx.sections[i].lineStart
 		end := len(src)
@@ -378,7 +427,6 @@ func tablePathAndLineStart(p *unstable.Parser, n *unstable.Node) ([]string, int,
 		}
 	}
 	if firstOff < 0 {
-		// Fallback: start at 0.
 		firstOff = 0
 	}
 	lineStart := findLineStart(p.Data(), firstOff)
@@ -386,13 +434,11 @@ func tablePathAndLineStart(p *unstable.Parser, n *unstable.Node) ([]string, int,
 }
 
 func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, src []byte) (kvInfo, []string, error) {
-	// KeyValue children: Value node, then Key nodes (possibly dotted).
 	val := n.Value()
 	if !val.Valid() {
 		return kvInfo{}, nil, fmt.Errorf("invalid TOML AST: KeyValue without value")
 	}
 
-	// Value start offset.
 	valueStart := rangeOffset(p, val)
 	lineStart := findLineStart(src, valueStart)
 	lineEnd := findLineEnd(src, valueStart)
@@ -406,7 +452,6 @@ func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, s
 		return kvInfo{}, nil, fmt.Errorf("invalid TOML AST: KeyValue without key")
 	}
 
-	// If there is a trailing comment on this expression, we stop replacement before it.
 	valueEnd := lineEnd
 	next := n.Next()
 	if next != nil && next.Kind == unstable.Comment && next.Raw.Length > 0 {
@@ -416,7 +461,6 @@ func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, s
 		}
 	}
 
-	// Trim trailing whitespace from replacement region so we don't leave double spaces.
 	for valueEnd > valueStart && (src[valueEnd-1] == ' ' || src[valueEnd-1] == '\t') {
 		valueEnd--
 	}
@@ -437,7 +481,6 @@ func rangeOffset(p *unstable.Parser, n *unstable.Node) int {
 		r := p.Range(n.Data)
 		return int(r.Offset)
 	}
-	// Fallback: use the line start of the current parser left position.
 	return 0
 }
 
@@ -591,7 +634,6 @@ func formatTOMLValue(v any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to encode TOML value: %w", err)
 	}
-	// Extract after '=' on the first line.
 	lineEnd := bytes.IndexByte(b, '\n')
 	if lineEnd < 0 {
 		lineEnd = len(b)
@@ -613,7 +655,6 @@ func formatDottedKey(keys []string) string {
 }
 
 func formatKey(k string) string {
-	// Use bare key if possible.
 	isBare := k != ""
 	for i := 0; i < len(k); i++ {
 		c := k[i]
@@ -625,11 +666,8 @@ func formatKey(k string) string {
 	if isBare {
 		return k
 	}
-	// Fallback to basic string key.
-	// Reuse TOML encoder for correctness.
 	s, err := formatTOMLValue(k)
 	if err != nil {
-		// Last resort: quote with double quotes, escaping quotes.
 		return `"` + strings.ReplaceAll(k, `"`, `\"`) + `"`
 	}
 	return s
@@ -668,35 +706,11 @@ func parseArrayIndex(s string) (int, error) {
 }
 
 func getAny(root map[string]any, keys []string) (any, bool) {
-	cur := any(root)
-	for _, k := range keys {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		v, ok := m[k]
-		if !ok {
-			return nil, false
-		}
-		cur = v
-	}
-	return cur, true
+	return jsonptr.GetByKeys(root, keys)
 }
 
 func setAny(root map[string]any, keys []string, value any) {
-	if len(keys) == 0 {
-		return
-	}
-	cur := root
-	for _, k := range keys[:len(keys)-1] {
-		next, ok := cur[k].(map[string]any)
-		if !ok {
-			next = make(map[string]any)
-			cur[k] = next
-		}
-		cur = next
-	}
-	cur[keys[len(keys)-1]] = value
+	jsonptr.SetByKeys(root, keys, value)
 }
 
 func setAnyInArray(arr []any, keys []string, value any) ([]any, error) {
@@ -796,22 +810,7 @@ func deleteAnyInArray(arr []any, keys []string) ([]any, error) {
 	if !ok {
 		return arr, nil
 	}
-	deleteAny(nested, rest)
+	jsonptr.DeleteByKeys(nested, rest)
 	arr[idx] = nested
 	return arr, nil
-}
-
-func deleteAny(root map[string]any, keys []string) {
-	if len(keys) == 0 {
-		return
-	}
-	cur := root
-	for _, k := range keys[:len(keys)-1] {
-		next, ok := cur[k].(map[string]any)
-		if !ok {
-			return
-		}
-		cur = next
-	}
-	delete(cur, keys[len(keys)-1])
 }

@@ -2,7 +2,7 @@
 // document.Document interface.
 //
 // It preserves comments and formatting by operating on github.com/tailscale/hujson's AST.
-// When no modifications are performed, Marshal returns the input bytes verbatim.
+// When no modifications are performed, Apply returns the input bytes verbatim.
 package jsonc
 
 import (
@@ -12,46 +12,23 @@ import (
 
 	"github.com/tailscale/hujson"
 	"github.com/yacchi/jubako/document"
-	"github.com/yacchi/jubako/jsonptr"
-	"github.com/yacchi/jubako/mapdoc"
 )
 
-// Document is a JSONC document implementation backed by hujson.Value.
-type Document struct {
-	root hujson.Value
-}
+// Document is a JSONC document implementation.
+// It is stateless - parsing and serialization happen on demand.
+type Document struct{}
 
 // Ensure Document implements document.Document interface.
 var _ document.Document = (*Document)(nil)
 
-// New creates a new empty JSONC document.
-func New() *Document {
-	v, _ := hujson.Parse([]byte("{}"))
-	return &Document{root: v}
-}
-
-// Parse parses JSONC bytes into a Document.
+// New returns a JSONC Document.
 //
-// Empty/whitespace input is treated as an empty object.
-func Parse(data []byte) (document.Document, error) {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 {
-		return New(), nil
-	}
-
-	v, err := hujson.Parse(trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse JSONC: %w", err)
-	}
-
-	if v.Value == nil {
-		return New(), nil
-	}
-	if v.Value.Kind() != '{' {
-		return nil, fmt.Errorf("failed to parse JSONC: root must be an object, got %q", v.Value.Kind())
-	}
-
-	return &Document{root: v}, nil
+// Example:
+//
+//	src := fs.New("~/.config/app.jsonc")
+//	layer.New("user", src, jsonc.New())
+func New() *Document {
+	return &Document{}
 }
 
 // Format returns the document format.
@@ -59,112 +36,105 @@ func (d *Document) Format() document.DocumentFormat {
 	return document.FormatJSONC
 }
 
-// Marshal serializes the document to bytes while preserving comments and formatting.
-func (d *Document) Marshal() ([]byte, error) {
-	return d.root.Pack(), nil
+// Get parses data bytes and returns content as map[string]any.
+// Returns empty map if data is nil or empty.
+func (d *Document) Get(data []byte) (map[string]any, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return map[string]any{}, nil
+	}
+
+	v, err := hujson.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JSONC: %w", err)
+	}
+
+	// Standardize to remove comments for decoding
+	v.Standardize()
+
+	var result map[string]any
+	if err := json.Unmarshal(v.Pack(), &result); err != nil {
+		return nil, fmt.Errorf("failed to decode JSONC: %w", err)
+	}
+
+	if result == nil {
+		return map[string]any{}, nil
+	}
+
+	return result, nil
 }
 
-// Get retrieves the value at the specified JSON Pointer path.
-func (d *Document) Get(path string) (any, bool) {
-	if path == "" || path == "/" {
-		m, err := d.decodeRootToMap()
+// Apply applies changeset to data bytes and returns new bytes.
+// If changeset is provided: parses data, applies changeset operations
+// using hujson's Patch API to preserve comments, then returns the result.
+// If changeset is empty: marshals parsed data directly.
+func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, error) {
+	// If no changeset, parse and re-marshal
+	if changeset.IsEmpty() {
+		trimmed := bytes.TrimSpace(data)
+		if len(trimmed) == 0 {
+			return []byte("{}\n"), nil
+		}
+
+		v, err := hujson.Parse(trimmed)
 		if err != nil {
-			return nil, false
+			return nil, fmt.Errorf("failed to parse JSONC: %w", err)
 		}
-		return m, true
+		return v.Pack(), nil
 	}
 
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return nil, false
-	}
-
-	m, err := d.decodeRootToMap()
-	if err != nil {
-		return nil, false
-	}
-	return mapdoc.Get(m, keys)
-}
-
-// Set sets the value at the specified JSON Pointer path, creating intermediate nodes as needed.
-func (d *Document) Set(path string, value any) error {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: path, Reason: "cannot set root document"}
-	}
-
-	// Ensure intermediate containers exist.
-	for i := 0; i < len(keys)-1; i++ {
-		parentPath := buildPointer(keys[:i+1])
-		nextKey := keys[i+1]
-		wantArray := isArrayIndex(nextKey)
-
-		exists, kind, err := d.peekKind(parentPath)
+	// Parse existing data to preserve comments
+	var root hujson.Value
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 {
+		v, err := hujson.Parse(trimmed)
 		if err != nil {
-			return err
+			// If parse fails, create new empty object
+			v, _ = hujson.Parse([]byte("{}"))
+			root = v
+		} else {
+			root = v
+		}
+	} else {
+		// No existing data, create new empty object
+		v, _ := hujson.Parse([]byte("{}"))
+		root = v
+	}
+
+	// Apply each patch operation using hujson.Patch
+	for _, patch := range changeset {
+		var op string
+		switch patch.Op {
+		case document.PatchOpAdd:
+			op = "add"
+		case document.PatchOpReplace:
+			op = "replace"
+		case document.PatchOpRemove:
+			op = "remove"
+		default:
+			continue
 		}
 
-		switch {
-		case !exists:
-			if wantArray {
-				if err := d.patchAdd(parentPath, []any{}); err != nil {
-					return err
-				}
-			} else {
-				if err := d.patchAdd(parentPath, map[string]any{}); err != nil {
-					return err
-				}
-			}
-		case wantArray && kind != '[':
-			if err := d.patchAdd(parentPath, []any{}); err != nil {
-				return err
-			}
-		case !wantArray && kind != '{':
-			if err := d.patchAdd(parentPath, map[string]any{}); err != nil {
-				return err
-			}
+		patchObj := map[string]any{
+			"op":   op,
+			"path": patch.Path,
+		}
+		if op == "add" || op == "replace" {
+			patchObj["value"] = patch.Value
 		}
 
-		if wantArray {
-			idx, _ := parseArrayIndex(nextKey)
-			if err := d.ensureArrayLen(parentPath, idx+1); err != nil {
-				return err
-			}
+		patchBytes, err := json.Marshal([]any{patchObj})
+		if err != nil {
+			continue
+		}
+
+		if err := root.Patch(patchBytes); err != nil {
+			// If patch fails, continue with remaining patches
+			continue
 		}
 	}
 
-	// Apply final set.
-	exists, _, err := d.peekKind(path)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return d.patchReplace(path, value)
-	}
-	return d.patchAdd(path, value)
-}
-
-// Delete removes the value at the specified JSON Pointer path.
-func (d *Document) Delete(path string) error {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-	if len(keys) == 0 {
-		return &document.InvalidPathError{Path: path, Reason: "cannot delete root document"}
-	}
-
-	exists, _, err := d.peekKind(path)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-	return d.patchRemove(path)
+	return root.Pack(), nil
 }
 
 // MarshalTestData generates JSON bytes (without comments) for testing.
@@ -174,146 +144,4 @@ func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal JSONC test data: %w", err)
 	}
 	return append(b, '\n'), nil
-}
-
-func (d *Document) decodeRootToMap() (map[string]any, error) {
-	v := d.root.Clone()
-	v.Standardize()
-
-	var root any
-	if err := json.Unmarshal(v.Pack(), &root); err != nil {
-		return nil, fmt.Errorf("failed to decode JSONC: %w", err)
-	}
-	obj, ok := root.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("failed to decode JSONC: root must be an object, got %T", root)
-	}
-	return obj, nil
-}
-
-func (d *Document) peekKind(path string) (exists bool, kind hujson.Kind, err error) {
-	m, err := d.decodeRootToMap()
-	if err != nil {
-		return false, 0, err
-	}
-	if path == "" || path == "/" {
-		return true, '{', nil
-	}
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		return false, 0, &document.InvalidPathError{Path: path, Reason: err.Error()}
-	}
-	v, ok := mapdoc.Get(m, keys)
-	if !ok {
-		return false, 0, nil
-	}
-	switch v.(type) {
-	case map[string]any:
-		return true, '{', nil
-	case []any:
-		return true, '[', nil
-	case nil:
-		return true, 'n', nil
-	case bool:
-		if v.(bool) {
-			return true, 't', nil
-		}
-		return true, 'f', nil
-	case string:
-		return true, '"', nil
-	default:
-		// encoding/json decodes numbers as float64
-		return true, '0', nil
-	}
-}
-
-func (d *Document) ensureArrayLen(arrayPath string, want int) error {
-	exists, kind, err := d.peekKind(arrayPath)
-	if err != nil {
-		return err
-	}
-	if !exists || kind != '[' {
-		return fmt.Errorf("expected array at %q", arrayPath)
-	}
-
-	m, err := d.decodeRootToMap()
-	if err != nil {
-		return err
-	}
-	ptrKeys, _ := jsonptr.Parse(arrayPath)
-	curAny, _ := mapdoc.Get(m, ptrKeys)
-	cur, _ := curAny.([]any)
-
-	for len(cur) < want {
-		if err := d.patchAdd(arrayPath+"/-", nil); err != nil {
-			return err
-		}
-		cur = append(cur, nil)
-	}
-	return nil
-}
-
-func buildPointer(keys []string) string {
-	if len(keys) == 0 {
-		return ""
-	}
-	var b bytes.Buffer
-	for _, k := range keys {
-		b.WriteByte('/')
-		b.WriteString(jsonptr.Escape(k))
-	}
-	return b.String()
-}
-
-func (d *Document) patchAdd(path string, value any) error {
-	return d.patch("add", path, value)
-}
-
-func (d *Document) patchReplace(path string, value any) error {
-	return d.patch("replace", path, value)
-}
-
-func (d *Document) patchRemove(path string) error {
-	return d.patch("remove", path, nil)
-}
-
-func (d *Document) patch(op string, path string, value any) error {
-	patch := map[string]any{
-		"op":   op,
-		"path": path,
-	}
-	if op == "add" || op == "replace" {
-		patch["value"] = value
-	}
-	b, err := json.Marshal([]any{patch})
-	if err != nil {
-		return fmt.Errorf("failed to build JSONC patch: %w", err)
-	}
-	if err := d.root.Patch(b); err != nil {
-		return fmt.Errorf("failed to apply JSONC patch: %w", err)
-	}
-	return nil
-}
-
-func isArrayIndex(s string) bool {
-	_, err := parseArrayIndex(s)
-	return err == nil
-}
-
-func parseArrayIndex(s string) (int, error) {
-	// Reuse mapdoc's parsing logic by mirroring constraints:
-	// numeric string, non-empty, non-negative.
-	if s == "" {
-		return 0, fmt.Errorf("array index must be non-empty")
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("array index must be numeric: %q", s)
-		}
-	}
-	var n int
-	for i := 0; i < len(s); i++ {
-		n = n*10 + int(s[i]-'0')
-	}
-	return n, nil
 }

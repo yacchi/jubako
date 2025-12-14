@@ -11,23 +11,142 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
-	"github.com/yacchi/jubako/mapdoc"
 )
+
+// TransformFunc transforms environment variable keys and values to JSON Pointer paths.
+// It receives the raw key (after prefix removal) and the raw value,
+// and returns the JSON Pointer path (e.g., "/server/port") and the final value.
+// Return an empty path to skip the variable entirely.
+type TransformFunc func(key, value string) (path string, finalValue any)
+
+// EnvironFunc is a function that returns environment variables.
+// Each string should be in the format "KEY=value".
+// This is typically os.Environ, but can be customized for testing or filtering.
+type EnvironFunc func() []string
+
+// DefaultTransform returns the default transform function that converts
+// environment variable keys to JSON Pointer paths using the specified delimiter.
+//
+// The transformation process:
+//  1. Convert the key to lowercase
+//  2. Split by the delimiter
+//  3. Build a JSON Pointer path from the segments
+//
+// Example with delimiter "_":
+//
+//	SERVER_PORT -> /server/port
+//	DATABASE_HOST -> /database/host
+//
+// Example with delimiter "__":
+//
+//	SERVER__PORT -> /server/port
+//	MY_APP__LOG_LEVEL -> /my_app/log_level
+func DefaultTransform(delim string) TransformFunc {
+	return func(key, value string) (string, any) {
+		key = strings.ToLower(key)
+		segments := strings.Split(key, strings.ToLower(delim))
+		escaped := make([]any, len(segments))
+		for i, seg := range segments {
+			escaped[i] = seg
+		}
+		return jsonptr.Build(escaped...), value
+	}
+}
+
+// Option configures the Layer.
+type Option func(*Layer)
+
+// WithDelimiter sets a custom delimiter for splitting environment variable keys
+// into nested paths. Default is "_".
+//
+// This also updates the transform function to use the new delimiter.
+// If you need a custom transform, call WithTransformFunc after WithDelimiter.
+//
+// Example with delimiter "__":
+//
+//	APP_SERVER__HOST=localhost -> /server/host
+//	APP_SERVER__PORT=8080      -> /server/port
+//
+// This is useful when your config keys contain underscores:
+//
+//	APP_MY_APP__LOG_LEVEL=debug -> /my_app/log_level
+func WithDelimiter(delim string) Option {
+	return func(l *Layer) {
+		l.delim = delim
+		l.transform = DefaultTransform(delim)
+	}
+}
+
+// WithEnvironFunc sets a custom function to provide environment variables.
+// Default is os.Environ.
+//
+// This is useful for:
+//   - Testing with controlled environment variables
+//   - Pre-filtering variables before processing
+//   - Injecting variables from other sources
+//
+// Example:
+//
+//	env.New("env", "APP_", env.WithEnvironFunc(func() []string {
+//	    return []string{"APP_FOO=bar", "APP_BAZ=qux"}
+//	}))
+func WithEnvironFunc(fn EnvironFunc) Option {
+	return func(l *Layer) {
+		l.environ = fn
+	}
+}
+
+// WithTransformFunc sets a custom transformation function for keys and values.
+// The function receives the raw key (after prefix removal) and the raw value,
+// and returns the JSON Pointer path and the final value.
+//
+// Return an empty path to skip the variable entirely.
+//
+// Note: When using TransformFunc, you have full control over the path transformation.
+// The delimiter option is ignored. Use DefaultTransform as a starting point if needed.
+//
+// Example - skip certain keys:
+//
+//	env.New("env", "APP_", env.WithTransformFunc(func(key, value string) (string, any) {
+//	    if strings.HasPrefix(key, "INTERNAL_") {
+//	        return "", nil // skip internal variables
+//	    }
+//	    // Use default transformation for other keys
+//	    return env.DefaultTransform("_")(key, value)
+//	}))
+//
+// Example - custom path mapping:
+//
+//	env.New("env", "APP_", env.WithTransformFunc(func(key, value string) (string, any) {
+//	    // Convert SERVER_HOST to /server/host
+//	    key = strings.ToLower(key)
+//	    parts := strings.Split(key, "_")
+//	    return jsonptr.Build(parts...), value
+//	}))
+func WithTransformFunc(fn TransformFunc) Option {
+	return func(l *Layer) {
+		l.transform = fn
+	}
+}
 
 // Layer loads configuration from environment variables with a specified prefix.
 // Environment variable names are converted to configuration paths by:
 // 1. Removing the prefix
 // 2. Converting to lowercase
-// 3. Replacing underscores with nested paths
+// 3. Replacing the delimiter (default "_") with nested paths
 //
 // Example: with prefix "APP_", environment variable "APP_SERVER_PORT=8080"
 // becomes path "/server/port" with value "8080".
 //
+// With delimiter "__": "APP_SERVER__PORT=8080" becomes "/server/port".
+//
 // This layer is read-only and does not support saving.
 type Layer struct {
-	name   layer.Name
-	prefix string
-	doc    *envDocument
+	name      layer.Name
+	prefix    string
+	delim     string
+	environ   EnvironFunc
+	transform TransformFunc
 }
 
 // Ensure Layer implements layer.Layer interface.
@@ -47,11 +166,29 @@ var _ layer.Layer = (*Layer)(nil)
 //	// With APP_SERVER_PORT=8080 and APP_DATABASE_HOST=localhost:
 //	// - /server/port = "8080"
 //	// - /database/host = "localhost"
-func New(name layer.Name, prefix string) *Layer {
-	return &Layer{
-		name:   name,
-		prefix: prefix,
+//
+// Options can be used to customize behavior:
+//
+//	// Use double underscore as delimiter
+//	env.New("env", "APP_", env.WithDelimiter("__"))
+//
+//	// Use custom environ function for testing
+//	env.New("env", "APP_", env.WithEnvironFunc(myEnvironFunc))
+//
+//	// Use transform function for custom key mapping
+//	env.New("env", "APP_", env.WithTransformFunc(myTransformFunc))
+func New(name layer.Name, prefix string, opts ...Option) *Layer {
+	l := &Layer{
+		name:      name,
+		prefix:    prefix,
+		delim:     "_",
+		environ:   os.Environ,
+		transform: DefaultTransform("_"),
 	}
+	for _, opt := range opts {
+		opt(l)
+	}
+	return l
 }
 
 // Name returns the layer's name.
@@ -59,8 +196,8 @@ func (l *Layer) Name() layer.Name {
 	return l.name
 }
 
-// Load reads environment variables and creates a Document.
-func (l *Layer) Load(ctx context.Context) (document.Document, error) {
+// Load reads environment variables and returns data as map[string]any.
+func (l *Layer) Load(ctx context.Context) (map[string]any, error) {
 	// Check for cancellation
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -68,7 +205,7 @@ func (l *Layer) Load(ctx context.Context) (document.Document, error) {
 
 	data := make(map[string]any)
 
-	for _, env := range os.Environ() {
+	for _, env := range l.environ() {
 		pair := strings.SplitN(env, "=", 2)
 		if len(pair) != 2 {
 			continue
@@ -77,28 +214,24 @@ func (l *Layer) Load(ctx context.Context) (document.Document, error) {
 		key, value := pair[0], pair[1]
 
 		// Check if the key has our prefix
-		if !strings.HasPrefix(key, l.prefix) {
+		if l.prefix != "" && !strings.HasPrefix(key, l.prefix) {
 			continue
 		}
 
-		// Remove prefix and convert to path
+		// Remove prefix
 		key = strings.TrimPrefix(key, l.prefix)
-		path := envKeyToPath(key)
+
+		// Transform key to JSON Pointer path
+		path, finalValue := l.transform(key, value)
+		if path == "" {
+			continue
+		}
 
 		// Set the value in the nested map
-		mapdoc.Set(data, path, value)
+		jsonptr.SetPath(data, path, finalValue)
 	}
 
-	l.doc = &envDocument{data: data}
-	return l.doc, nil
-}
-
-// Document returns the last loaded document.
-func (l *Layer) Document() document.Document {
-	if l.doc == nil {
-		return nil
-	}
-	return l.doc
+	return data, nil
 }
 
 // Prefix returns the environment variable prefix.
@@ -106,124 +239,18 @@ func (l *Layer) Prefix() string {
 	return l.prefix
 }
 
+// Delimiter returns the delimiter used for splitting keys into paths.
+func (l *Layer) Delimiter() string {
+	return l.delim
+}
+
 // Save is not supported for environment variable layers.
 // Environment variables are inherently read-only in this implementation.
-func (l *Layer) Save(ctx context.Context) error {
+func (l *Layer) Save(ctx context.Context, changeset document.JSONPatchSet) error {
 	return fmt.Errorf("environment variable layer %q does not support saving", l.name)
 }
 
 // CanSave returns false because environment variable layers are read-only.
 func (l *Layer) CanSave() bool {
 	return false
-}
-
-// envKeyToPath converts an environment variable key to a path.
-// Example: "SERVER_PORT" -> []string{"server", "port"}
-func envKeyToPath(key string) []string {
-	key = strings.ToLower(key)
-	return strings.Split(key, "_")
-}
-
-// envDocument is a simple Document implementation for environment variables.
-type envDocument struct {
-	data map[string]any
-}
-
-// Ensure envDocument implements document.Document interface.
-var _ document.Document = (*envDocument)(nil)
-
-// Get retrieves a value at the given JSON Pointer path.
-func (d *envDocument) Get(path string) (any, bool) {
-	if path == "" || path == "/" {
-		return d.data, true
-	}
-
-	// Parse JSON Pointer path
-	parts := parseJSONPointer(path)
-	return mapdoc.Get(d.data, parts)
-}
-
-// Set is not supported for environment variable documents.
-// Environment variables are read-only in this implementation.
-func (d *envDocument) Set(path string, value any) error {
-	return document.Unsupported("environment variables are read-only")
-}
-
-// Delete is not supported for environment variable documents.
-// Environment variables are read-only in this implementation.
-func (d *envDocument) Delete(path string) error {
-	return document.Unsupported("environment variables are read-only")
-}
-
-// Marshal is not meaningfully supported for environment variables.
-func (d *envDocument) Marshal() ([]byte, error) {
-	// This shouldn't be called since Layer doesn't implement WritableLayer
-	return nil, nil
-}
-
-// Format returns the document format.
-func (d *envDocument) Format() document.DocumentFormat {
-	return "env"
-}
-
-// parseJSONPointer parses a JSON Pointer path into parts using RFC 6901 escaping.
-func parseJSONPointer(path string) []string {
-	keys, err := jsonptr.Parse(path)
-	if err != nil {
-		// Fallback for invalid paths: treat as simple split
-		if path == "" || path == "/" {
-			return nil
-		}
-		if strings.HasPrefix(path, "/") {
-			path = path[1:]
-		}
-		return strings.Split(path, "/")
-	}
-	return keys
-}
-
-// MarshalTestData generates test data for environment variable format.
-// Environment variables have limitations:
-//   - Arrays are not supported
-//   - All values are strings
-//   - Nested maps are flattened with underscore separators
-//
-// Returns UnsupportedStructureError for arrays or non-string leaf values
-// that cannot be represented as environment variables.
-func (d *envDocument) MarshalTestData(data map[string]any) ([]byte, error) {
-	var lines []string
-	if err := marshalEnvData("", data, &lines); err != nil {
-		return nil, err
-	}
-	return []byte(strings.Join(lines, "\n")), nil
-}
-
-// marshalEnvData recursively converts map data to KEY=value lines.
-func marshalEnvData(prefix string, data map[string]any, lines *[]string) error {
-	for key, value := range data {
-		envKey := strings.ToUpper(key)
-		if prefix != "" {
-			envKey = prefix + "_" + envKey
-		}
-
-		switch v := value.(type) {
-		case map[string]any:
-			if err := marshalEnvData(envKey, v, lines); err != nil {
-				return err
-			}
-		case []any:
-			path := "/" + strings.ToLower(strings.ReplaceAll(envKey, "_", "/"))
-			return document.UnsupportedAt(path, "arrays not supported in environment variables")
-		case string:
-			*lines = append(*lines, envKey+"="+v)
-		case nil:
-			// Skip nil values - env vars cannot represent null
-			path := "/" + strings.ToLower(strings.ReplaceAll(envKey, "_", "/"))
-			return document.UnsupportedAt(path, "null values not supported in environment variables")
-		default:
-			// Convert other types to string representation
-			*lines = append(*lines, fmt.Sprintf("%s=%v", envKey, v))
-		}
-	}
-	return nil
 }

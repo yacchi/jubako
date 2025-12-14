@@ -5,8 +5,9 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/yacchi/jubako/container"
 	"github.com/yacchi/jubako/decoder"
-	"github.com/yacchi/jubako/maputil"
+	"github.com/yacchi/jubako/jsonptr"
 )
 
 const tagName = "jubako"
@@ -195,7 +196,7 @@ func applyMappingsWithRoot(root, src map[string]any, table *MappingTable) map[st
 	// Start with a deep copy of the source (or empty map if src doesn't exist)
 	var dst map[string]any
 	if src != nil {
-		dst = deepCopyMap(src)
+		dst = container.DeepCopyMap(src)
 	} else {
 		dst = make(map[string]any)
 	}
@@ -213,7 +214,7 @@ func applyMappingsWithRoot(root, src map[string]any, table *MappingTable) map[st
 			} else {
 				lookupSrc = root // Absolute paths use root
 			}
-			if value, ok := maputil.GetPath(lookupSrc, m.SourcePath); ok {
+			if value, ok := jsonptr.GetPath(lookupSrc, m.SourcePath); ok {
 				dst[m.FieldKey] = value
 			}
 		}
@@ -317,42 +318,4 @@ func parseJSONTagKey(tag string) string {
 		return tag[:idx]
 	}
 	return tag
-}
-
-// deepCopyMap creates a deep copy of a map[string]any.
-func deepCopyMap(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	result := make(map[string]any, len(m))
-	for k, v := range m {
-		switch val := v.(type) {
-		case map[string]any:
-			result[k] = deepCopyMap(val)
-		case []any:
-			result[k] = deepCopySlice(val)
-		default:
-			result[k] = v
-		}
-	}
-	return result
-}
-
-// deepCopySlice creates a deep copy of a []any.
-func deepCopySlice(s []any) []any {
-	if s == nil {
-		return nil
-	}
-	result := make([]any, len(s))
-	for i, v := range s {
-		switch val := v.(type) {
-		case map[string]any:
-			result[i] = deepCopyMap(val)
-		case []any:
-			result[i] = deepCopySlice(val)
-		default:
-			result[i] = v
-		}
-	}
-	return result
 }

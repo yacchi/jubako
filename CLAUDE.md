@@ -74,9 +74,8 @@ type Name string
 // Save capability is determined by CanSave(), which delegates to the underlying source.
 type Layer interface {
     Name() Name
-    Load(ctx context.Context) (document.Document, error)
-    Document() document.Document
-    Save(ctx context.Context) error
+    Load(ctx context.Context) (map[string]any, error)
+    Save(ctx context.Context, changeset document.JSONPatchSet) error
     CanSave() bool
 }
 ```
@@ -97,35 +96,28 @@ const (
 )
 ```
 
-### 2. Source and Parser (Separation of Concerns)
+### 2. Source and Document (Separation of Concerns)
 
-I/O operations (Source) and format parsing (Parser) are separated for flexibility:
+I/O operations (Source) and format handling (Document) are separated for flexibility:
 
 ```go
 // source/source.go
 type Source interface {
     Load(ctx context.Context) ([]byte, error)
-    Save(ctx context.Context, data []byte) error
+    Save(ctx context.Context, updateFunc UpdateFunc) error
     CanSave() bool
-}
-
-// document/parser.go
-type Parser interface {
-    Parse(data []byte) (Document, error)
-    Format() DocumentFormat
-    CanMarshal() bool  // true if can marshal with comment preservation
 }
 ```
 
-**Note**: Parser is defined in the `document` package because its responsibility is to create Document instances.
+**Note**: Document is stateless; it parses bytes and can apply patch operations to bytes.
 
 **Implementations**:
 
 - `source/bytes`: Read-only byte slice source
 - `source/fs`: File system source with tilde expansion
-- `format/yaml`: YAML parser with comment preservation
-- `format/toml`: TOML parser with comment/format preservation
-- `format/jsonc`: JSONC parser with comment/format preservation
+- `format/yaml`: YAML document with comment preservation
+- `format/toml`: TOML document with comment/format preservation
+- `format/jsonc`: JSONC document with comment/format preservation
 
 **Security Note**: For configuration files containing sensitive information (credentials, API keys),
 use restrictive file permissions:
@@ -137,21 +129,20 @@ src := fs.New("~/.config/app/secrets.yaml", fs.WithFileMode(0600), fs.WithDirMod
 
 ### 3. Document (Interface for AST-based editing)
 
-Abstract interface for comment-preserving document formats:
+Abstract interface for format handling and (optionally) comment-preserving edits:
 
 ```go
 // document/document.go
 type Document interface {
-    // Path-based access using JSONPointer (RFC 6901)
-    Get(path string) (any, bool)
-    Set(path string, value any) error
-    Delete(path string) error
+    // Parse bytes into map[string]any
+    Get(data []byte) (map[string]any, error)
 
-    // Serialization (preserves comments)
-    Marshal() ([]byte, error)
+    // Apply changes to bytes (optionally preserving comments/formatting)
+    Apply(data []byte, changeset JSONPatchSet) ([]byte, error)
 
     // Metadata
     Format() DocumentFormat
+    CanApply() bool
 
     // Test helper for generating format-specific test data
     MarshalTestData(data map[string]any) ([]byte, error)
@@ -255,20 +246,21 @@ store := jubako.New[AppConfig]()
 
 // Add layers (priority order: defaults < user < project < env)
 store.Add(
-    layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+    layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()),
     jubako.WithPriority(jubako.PriorityDefaults),
 )
 
 store.Add(
-    layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.NewParser()),
+    layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.New()),
     jubako.WithPriority(jubako.PriorityUser),
 )
 
 store.Add(
-    layer.New("project", fs.New(".app.yaml"), yaml.NewParser()),
+    layer.New("project", fs.New(".app.yaml"), yaml.New()),
     jubako.WithPriority(jubako.PriorityProject),
 )
 
+// Environment variables: supports WithDelimiter, WithEnvironFunc, WithTransformFunc options
 store.Add(
     env.New("env", "APP_"),
     jubako.WithPriority(jubako.PriorityEnv),
@@ -324,8 +316,8 @@ for _, info := range store.ListLayers() {
 // They will be assigned priorities in order: 0, 10, 20, ...
 store := jubako.New[AppConfig](jubako.WithPriorityStep(10))
 
-store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
-store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.New()))
+store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 ```
 
 ## Implementation Status
@@ -347,9 +339,9 @@ store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()
 ### Phase 3: Layer Management ✅ Complete
 
 - [x] Layer interface (`Layer`)
-- [x] `SourceParser` layer implementation
+- [x] `FileLayer` layer implementation
 - [x] Source interface and implementations (`bytes`, `fs`)
-- [x] Parser interface
+- [x] Document interface
 - [x] Origin tracking (`ResolvedValue`, `LayerInfo`)
 - [x] Materialization (merge) logic
 - [x] Write-back to correct layer
@@ -396,12 +388,13 @@ jubako/
 │
 ├── document/              # Document abstraction
 │   ├── document.go        # Document interface definition
-│   ├── parser.go          # Parser interface definition
+│   ├── patch.go           # JSONPatch / JSONPatchSet
 │   ├── document_test.go
 │   ├── errors.go          # Error types
 │   └── errors_test.go
 │
 ├── format/                # Format implementations
+│   ├── json/              # JSON (encoding/json, no comment preservation)
 │   ├── jsonc/             # JSONC (github.com/tailscale/hujson)
 │   ├── toml/              # TOML (github.com/pelletier/go-toml/v2)
 │   └── yaml/              # YAML (gopkg.in/yaml.v3)
@@ -414,7 +407,8 @@ jubako/
 │       └── source.go
 │
 └── layer/                 # Layer implementations
-    ├── layer.go           # Layer, SourceParser
+    ├── layer.go           # Layer, FileLayer
+    ├── mapdata/           # In-memory map layer (tests/programmatic)
     └── env/               # Environment variable layer
         ├── env.go
         └── env_test.go
@@ -514,10 +508,10 @@ type AppConfig struct {
 - Built-in subscription mechanism
 - Cleaner API for consumers
 
-### Why separate Source and Parser?
+### Why separate Source and Document?
 
-- Source handles I/O (files, bytes, network)
-- Parser handles format (YAML, TOML, JSON)
+- Source handles I/O (files, bytes, network) and optimistic locking
+- Document handles format parsing and patch application (YAML, TOML, JSON/JSONC)
 - Enables mix-and-match combinations
 - Each can be tested independently
 

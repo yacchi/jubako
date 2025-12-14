@@ -1,56 +1,51 @@
 // Package document provides an abstraction for working with structured
 // configuration documents while preserving comments and formatting.
 //
-// The Document interface supports path-based access using JSON Pointer
-// (RFC 6901) syntax, enabling precise navigation through nested structures.
+// The Document interface is a pure format handler - it handles parsing and
+// serialization only. Data loading and caching is managed by Source and Layer.
 package document
 
-// Document represents a structured configuration document that can be
-// read from and written to while preserving comments and formatting.
+// Document represents a format handler for configuration data.
 //
-// Path syntax follows JSON Pointer (RFC 6901):
-//   - "/server/port" - accesses server.port
-//   - "/servers/0/name" - accesses servers[0].name
-//   - "/feature~1flags/enabled" - accesses key "feature/flags" (escaped)
+// Document is stateless and does not cache data internally.
+// It only knows how to:
+//   - Parse bytes into map[string]any
+//   - Apply patches to bytes and return new bytes
+//   - Marshal test data
 //
-// See: https://tools.ietf.org/html/rfc6901
+// Data source management (loading, caching, locking) is handled by Source and Layer.
 type Document interface {
-	// Get retrieves the value at the specified JSON Pointer path.
-	// Returns the value and true if found, or nil and false if not found.
+	// Get parses data bytes and returns content as map[string]any.
+	// Returns empty map if data is nil or empty.
 	//
 	// Example:
-	//   value, ok := doc.Get("/server/port")
-	//   if ok {
-	//     port := value.(int)
-	//   }
-	Get(path string) (any, bool)
-
-	// Set sets the value at the specified JSON Pointer path.
-	// Creates intermediate nodes if they don't exist.
-	// Returns an error if the path is invalid or the operation fails.
-	//
-	// Example:
-	//   err := doc.Set("/server/port", 8080)
-	Set(path string, value any) error
-
-	// Delete removes the value at the specified JSON Pointer path.
-	// Returns an error if the path is invalid or the operation fails.
-	// Returns nil if the path doesn't exist (idempotent).
-	//
-	// Example:
-	//   err := doc.Delete("/server/debug")
-	Delete(path string) error
-
-	// Marshal serializes the document to bytes, preserving comments
-	// and formatting where possible.
-	//
-	// Example:
-	//   data, err := doc.Marshal()
+	//   data, err := doc.Get(rawBytes)
 	//   if err != nil {
 	//     return err
 	//   }
-	//   os.WriteFile("config.yaml", data, 0644)
-	Marshal() ([]byte, error)
+	//   port := data["server"].(map[string]any)["port"]
+	Get(data []byte) (map[string]any, error)
+
+	// Apply applies changeset to data bytes and returns new bytes.
+	//
+	// If the format supports AST-based updates (CanApply() returns true) and
+	// changeset is provided: parses data, applies changeset operations
+	// to preserve comments and formatting, then marshals the result.
+	//
+	// If changeset is empty or format doesn't support AST updates: parses
+	// data and marshals it directly.
+	//
+	// The caller (typically Layer) handles actual file write via Source.Save.
+	//
+	// Example:
+	//   newBytes, err := doc.Apply(currentBytes, changeset)
+	//   if err != nil {
+	//     return err
+	//   }
+	//   return source.Save(ctx, func(current []byte) ([]byte, error) {
+	//     return doc.Apply(current, changeset)
+	//   })
+	Apply(data []byte, changeset JSONPatchSet) ([]byte, error)
 
 	// Format returns the document format type.
 	//
@@ -64,8 +59,8 @@ type Document interface {
 	// containing the given data structure. This is intended for testing.
 	//
 	// Returns UnsupportedStructureError if the data contains structures
-	// that cannot be represented in this document format (e.g., arrays
-	// in environment variable format).
+	// that cannot be represented in this document format (e.g., null values
+	// in TOML format).
 	//
 	// Example:
 	//   data := map[string]any{"server": map[string]any{"port": 8080}}
@@ -92,3 +87,4 @@ const (
 	// FormatJSON represents standard JSON.
 	FormatJSON DocumentFormat = "json"
 )
+

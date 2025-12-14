@@ -30,9 +30,7 @@ items, and together they form a complete set - much like how this library manage
     - [Environment Variable Layer](#environment-variable-layer)
 - [Custom Format and Source Implementation](#custom-format-and-source-implementation)
     - [Source Interface](#source-interface)
-    - [Parser Interface](#parser-interface)
     - [Document Interface](#document-interface)
-    - [Simple Implementation with mapdoc](#simple-implementation-with-mapdoc)
     - [Layer Interface](#layer-interface)
 - [Comparison with Other Libraries](#comparison-with-other-libraries)
 - [License](#license)
@@ -114,21 +112,21 @@ func main() {
 
 	// Add configuration layers (lower priority first)
 	if err := store.Add(
-		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := store.Add(
-		layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.NewParser()),
+		layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityUser),
 	); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := store.Add(
-		layer.New("project", fs.New(".app.yaml"), yaml.NewParser()),
+		layer.New("project", fs.New(".app.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityProject),
 	); err != nil {
 		log.Fatal(err)
@@ -480,20 +478,20 @@ func main() {
 
 	// Add layer with explicit priority
 	err := store.Add(
-		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	)
 
 	// Add as read-only (prevents modifications via SetTo)
 	err = store.Add(
-		layer.New("system", fs.New("/etc/app/config.yaml"), yaml.NewParser()),
+		layer.New("system", fs.New("/etc/app/config.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 		jubako.WithReadOnly(),
 	)
 
 	// Without priority, auto-assigned in order (0, 10, 20, ...)
-	err = store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
-	err = store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+	err = store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.New()))
+	err = store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 
 	_ = err
 }
@@ -755,7 +753,7 @@ func main() {
 
 	// YAML (with comment preservation)
 	_ = store.Add(
-		layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()),
+		layer.New("user", fs.New("~/.config/app.yaml"), yaml.New()),
 		jubako.WithPriority(jubako.PriorityUser),
 	)
 }
@@ -773,10 +771,10 @@ server:
 # comments, blank lines, and indentation remain intact
 ```
 
-### Simple Support Formats (mapdoc-based)
+### Simple Support Formats (No Format Preservation)
 
-Simple implementations backed by `map[string]any`. Comments are not preserved,
-but reading and writing works correctly.
+These formats support reading and writing but do not preserve comments and
+formatting. Output is regenerated on save.
 
 | Format | Package       | Description                           |
 |--------|---------------|---------------------------------------|
@@ -799,7 +797,7 @@ func main() {
 
 	// JSON (without comment preservation)
 	_ = store.Add(
-		layer.New("config", fs.New("config.json"), json.NewParser()),
+		layer.New("config", fs.New("config.json"), json.New()),
 		jubako.WithPriority(jubako.PriorityProject),
 	)
 }
@@ -809,10 +807,10 @@ func main() {
 
 | Source                | How to add                                    | Format Preservation |
 |-----------------------|-----------------------------------------------|---------------------|
-| YAML                  | `layer.New(..., <source>, yaml.NewParser())`  | Yes                 |
-| TOML                  | `layer.New(..., <source>, toml.NewParser())`  | Yes                 |
-| JSONC                 | `layer.New(..., <source>, jsonc.NewParser())` | Yes                 |
-| JSON                  | `layer.New(..., <source>, json.NewParser())`  | No                  |
+| YAML                  | `layer.New(..., <source>, yaml.New())`        | Yes                 |
+| TOML                  | `layer.New(..., <source>, toml.New())`        | Yes                 |
+| JSONC                 | `layer.New(..., <source>, jsonc.New())`       | Yes                 |
+| JSON                  | `layer.New(..., <source>, json.New())`        | No                  |
 | Environment variables | `env.New(name, prefix)`                       | N/A                 |
 
 ### Environment Variable Layer
@@ -865,9 +863,10 @@ type Source interface {
 	// Load reads configuration data from the source.
 	Load(ctx context.Context) ([]byte, error)
 
-	// Save writes data to the source.
+	// Save writes data back to the source using optimistic locking.
 	// Returns ErrSaveNotSupported if saving is not supported.
-	Save(ctx context.Context, data []byte) error
+	// Returns ErrSourceModified if the source was modified externally.
+	Save(ctx context.Context, updateFunc UpdateFunc) error
 
 	// CanSave returns whether saving is supported.
 	CanSave() bool
@@ -908,7 +907,7 @@ func (s *HTTPSource) Load(ctx context.Context) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func (s *HTTPSource) Save(ctx context.Context, data []byte) error {
+func (s *HTTPSource) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	return source.ErrSaveNotSupported
 }
 
@@ -919,37 +918,16 @@ func (s *HTTPSource) CanSave() bool {
 // Usage:
 //
 //  store.Add(
-//      layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.NewParser()),
+//      layer.New("remote", NewHTTP("https://config.example.com/app.yaml"), yaml.New()),
 //      jubako.WithPriority(jubako.PriorityDefaults),
 //  )
 ```
 
-### Parser Interface
-
-Parser converts raw bytes into a Document:
-
-```go
-package document
-
-type Document interface{}
-type DocumentFormat string
-
-// document/parser.go
-type Parser interface {
-	// Parse converts bytes to Document.
-	Parse(data []byte) (Document, error)
-
-	// Format returns the format this parser handles.
-	Format() DocumentFormat
-
-	// CanMarshal returns whether marshaling with comment preservation is supported.
-	CanMarshal() bool
-}
-```
-
 ### Document Interface
 
-Document provides access to structured configuration data:
+Document is a stateless format handler. It parses bytes into `map[string]any` and
+can apply a `document.JSONPatchSet` to update bytes (optionally preserving
+comments and formatting).
 
 ```go
 package document
@@ -958,134 +936,31 @@ type DocumentFormat string
 
 // document/document.go
 type Document interface {
-	// Get retrieves value at path (JSON Pointer).
-	Get(path string) (any, bool)
+	// Get parses data bytes and returns content as map[string]any.
+	// Returns empty map if data is nil or empty.
+	Get(data []byte) (map[string]any, error)
 
-	// Set sets value at path.
-	Set(path string, value any) error
-
-	// Delete removes value at path.
-	Delete(path string) error
-
-	// Marshal serializes document to bytes.
-	// Preserves comments and formatting where possible.
-	Marshal() ([]byte, error)
+	// Apply applies changeset to data bytes and returns new bytes.
+	// For comment-preserving formats, Apply can use changeset to keep
+	// comments/formatting stable.
+	Apply(data []byte, changeset JSONPatchSet) ([]byte, error)
 
 	// Format returns the document format.
 	Format() DocumentFormat
+
+	// CanApply returns true if Apply can preserve comments/formatting.
+	CanApply() bool
 
 	// MarshalTestData converts data to bytes for testing.
 	MarshalTestData(data map[string]any) ([]byte, error)
 }
 ```
 
-### Two Approaches for Format Implementation
-
-When implementing custom formats, there are two approaches:
-
-#### 1. Simple Implementation with mapdoc
-
-When format preservation is not needed, use the `mapdoc` package to easily add formats.
-It provides all basic features including JSON Pointer path access and automatic intermediate map creation,
-backed by `map[string]any`.
-
-**JSON format implementation example (~30 lines)**:
-
-```go
-// format/json/document.go
-package json
-
-import (
-	"encoding/json"
-	"fmt"
-
-	"github.com/yacchi/jubako/document"
-	"github.com/yacchi/jubako/mapdoc"
-)
-
-// Document is a JSON document backed by map[string]any
-type Document = mapdoc.Document
-
-// Parse converts JSON data to a document
-func Parse(data []byte) (*Document, error) {
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-	return mapdoc.New(
-		document.FormatJSON,
-		mapdoc.WithData(root),
-		mapdoc.WithMarshal(marshalJSON),
-	), nil
-}
-
-func marshalJSON(data map[string]any) ([]byte, error) {
-	return json.MarshalIndent(data, "", "  ")
-}
-```
-
-#### 2. AST-based Full Support Implementation
-
-When comment and format preservation is required, implement a Document that directly
-manipulates the format-specific AST.
-
-**YAML format implementation overview**:
-
-```go
-// format/yaml/document.go
-package yaml
-
-import (
-	"fmt"
-
-	"github.com/yacchi/jubako/document"
-	"gopkg.in/yaml.v3"
-)
-
-// Document is a YAML document backed by yaml.Node AST
-type Document struct {
-	root *yaml.Node // Holds the AST directly
-}
-
-var _ document.Document = (*Document)(nil)
-
-// Get traverses yaml.Node to retrieve values.
-func (d *Document) Get(path string) (any, bool) { return nil, false }
-
-// Set traverses and updates yaml.Node.
-func (d *Document) Set(path string, value any) error { return nil }
-
-// Delete removes the value at path.
-func (d *Document) Delete(path string) error { return nil }
-
-// Marshal serializes the AST as-is.
-func (d *Document) Marshal() ([]byte, error) {
-	return yaml.Marshal(d.root) // Outputs with comments
-}
-
-// Format returns the document format.
-func (d *Document) Format() document.DocumentFormat { return document.FormatYAML }
-
-// MarshalTestData generates YAML bytes for tests.
-func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
-	if data == nil {
-		data = map[string]any{}
-	}
-	b, err := yaml.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal test data: %w", err)
-	}
-	return b, nil
-}
-```
-
-TOML and JSONC achieve comment preservation similarly by manipulating their respective library ASTs.
-
 ### Layer Interface
 
-Layer represents a configuration source combining Source and Parser.
-Typically use `SourceParser` created by `layer.New()`, but special implementations
-like the environment variable layer are also possible:
+Layer represents a configuration source that loads data as `map[string]any` and
+can optionally save changes via a `document.JSONPatchSet`. The standard
+implementation is `layer.FileLayer`, created by `layer.New(source, document)`:
 
 ```go
 package layer
@@ -1103,14 +978,11 @@ type Layer interface {
 	// Name returns the unique identifier for this layer.
 	Name() Name
 
-	// Load loads configuration and returns a Document.
-	Load(ctx context.Context) (document.Document, error)
+	// Load reads configuration and returns data as map[string]any.
+	Load(ctx context.Context) (map[string]any, error)
 
-	// Document returns the loaded Document.
-	Document() document.Document
-
-	// Save persists the Document to the source.
-	Save(ctx context.Context) error
+	// Save persists changes back to the source using optimistic locking.
+	Save(ctx context.Context, changeset document.JSONPatchSet) error
 
 	// CanSave returns whether saving is supported.
 	CanSave() bool
@@ -1121,10 +993,10 @@ See the following packages for existing implementations:
 
 - `source/bytes` - Byte slice source (read-only)
 - `source/fs` - File system source
-- `format/yaml` - YAML parser (AST-based, comment preservation)
-- `format/toml` - TOML parser (separate module, comment + format preservation)
-- `format/jsonc` - JSONC parser (separate module, comment + format preservation)
-- `format/json` - JSON parser (mapdoc-based, simple)
+- `format/yaml` - YAML document (separate module, comment preservation)
+- `format/toml` - TOML document (separate module, comment + format preservation)
+- `format/jsonc` - JSONC document (separate module, comment + format preservation)
+- `format/json` - JSON document (standard library, no comment preservation)
 - `layer/env` - Environment variable layer
 
 ## Comparison with Typical Config Libraries

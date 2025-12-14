@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/layer/mapdata"
 )
@@ -57,20 +58,17 @@ func TestMapdataLayer_Creation(t *testing.T) {
 	if l.Name() != "test" {
 		t.Errorf("Name() = %q, want %q", l.Name(), "test")
 	}
-	if l.Document() != nil {
-		t.Error("Document() should be nil before loading")
-	}
 
 	// Load and verify
-	doc, err := l.Load(ctx)
+	result, err := l.Load(ctx)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if doc == nil {
-		t.Error("Load() returned nil document")
+	if result == nil {
+		t.Error("Load() returned nil")
 	}
-	if l.Document() != doc {
-		t.Error("Document() should return loaded document")
+	if result["test"] != "value" {
+		t.Errorf("Load()[test] = %v, want value", result["test"])
 	}
 }
 
@@ -89,39 +87,46 @@ func TestLayerPriority_CustomValues(t *testing.T) {
 	}
 }
 
-func TestMapdataLayer_Document(t *testing.T) {
+func TestMapdataLayer_Load(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("document is nil before load", func(t *testing.T) {
+	t.Run("load returns data", func(t *testing.T) {
 		l := mapdata.New("test", map[string]any{"test": "value"})
 
-		if l.Document() != nil {
-			t.Error("Document() should return nil before loading")
-		}
-	})
-
-	t.Run("document is available after load", func(t *testing.T) {
-		l := mapdata.New("test", map[string]any{"test": "value"})
-
-		doc, err := l.Load(ctx)
+		result, err := l.Load(ctx)
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
-		if doc == nil {
-			t.Error("Load() returned nil document")
+		if result == nil {
+			t.Error("Load() returned nil")
+		}
+		if result["test"] != "value" {
+			t.Errorf("Load()[test] = %v, want value", result["test"])
+		}
+	})
+
+	t.Run("load with nested data", func(t *testing.T) {
+		l := mapdata.New("test", map[string]any{
+			"server": map[string]any{
+				"host": "localhost",
+				"port": 8080,
+			},
+		})
+
+		result, err := l.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if result == nil {
+			t.Error("Load() returned nil")
 		}
 
-		if l.Document() == nil {
-			t.Error("Document() should return document after loading")
-		}
-
-		// Verify we can use the document
-		val, ok := l.Document().Get("/test")
+		server, ok := result["server"].(map[string]any)
 		if !ok {
-			t.Error("Get(/test) should succeed")
+			t.Fatal("result[server] is not a map")
 		}
-		if val != "value" {
-			t.Errorf("Get(/test) = %v, want %q", val, "value")
+		if server["host"] != "localhost" {
+			t.Errorf("server[host] = %v, want localhost", server["host"])
 		}
 	})
 }
@@ -140,30 +145,22 @@ func TestMapdataLayer_Save(t *testing.T) {
 	t.Run("save succeeds for mapdata layer", func(t *testing.T) {
 		l := mapdata.New("test", map[string]any{"test": "value"})
 
-		_, err := l.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load() error = %v", err)
+		// Modify via Save with changeset
+		changeset := document.JSONPatchSet{
+			document.NewReplacePatch("/test", "modified"),
 		}
-
-		// Modify via document
-		err = l.Document().Set("/test", "modified")
-		if err != nil {
-			t.Fatalf("Set() error = %v", err)
-		}
-
-		// Save should succeed (no-op but validates interface)
-		err = l.Save(ctx)
+		err := l.Save(ctx, changeset)
 		if err != nil {
 			t.Errorf("Save() error = %v, want nil", err)
 		}
 
-		// Data should be accessible
-		val, ok := l.Document().Get("/test")
-		if !ok {
-			t.Error("Get(/test) not found after save")
+		// Load and verify the data was saved
+		result, err := l.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
 		}
-		if val != "modified" {
-			t.Errorf("Get(/test) = %v, want %q", val, "modified")
+		if result["test"] != "modified" {
+			t.Errorf("result[test] = %v, want modified", result["test"])
 		}
 	})
 }

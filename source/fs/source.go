@@ -10,6 +10,23 @@ import (
 	"github.com/yacchi/jubako/source"
 )
 
+// fileLock attempts to acquire an exclusive lock on the given file descriptor.
+// Returns a function to release the lock. If locking is not supported by the
+// filesystem, both the error and unlock function will be nil - the operation
+// proceeds without locking since there's no safe alternative anyway.
+// The unlock function is safe to call even if it's nil.
+func fileLock(fd int) (unlock func(), err error) {
+	if err := flockExclusive(fd); err != nil {
+		// Check if locking is not supported by this filesystem
+		if isLockNotSupportedError(err) {
+			// Proceed without locking - no safe alternative exists
+			return func() {}, nil
+		}
+		return nil, err
+	}
+	return func() { flockUnlock(fd) }, nil
+}
+
 // Default permission modes.
 const (
 	DefaultFileMode = 0644
@@ -107,13 +124,17 @@ func (s *Source) Load(ctx context.Context) ([]byte, error) {
 	return data, nil
 }
 
-// Save implements the source.Source interface.
+// Save implements the source.Source interface with file locking.
+// The updateFunc receives current file contents and returns the new contents to write.
+//
+// File locking (flock) is used to prevent concurrent modifications.
+// If the filesystem doesn't support locking, the operation proceeds without it
+// since there's no safe alternative anyway.
+//
 // The write is performed atomically by writing to a temporary file first,
 // then renaming it to the target path. Parent directories are created if
 // they do not exist.
-// If a file was previously loaded via Load, the same path is used for saving.
-// Otherwise, the primary path is used.
-func (s *Source) Save(ctx context.Context, data []byte) error {
+func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	// Check for cancellation
 	if err := ctx.Err(); err != nil {
 		return err
@@ -135,7 +156,42 @@ func (s *Source) Save(ctx context.Context, data []byte) error {
 		return fmt.Errorf("failed to create directory %q: %w", dir, err)
 	}
 
-	// Create temporary file in the same directory to ensure atomic rename
+	// Open or create file for locking
+	// We use O_RDWR|O_CREATE to handle both existing and new files
+	lockFile, err := os.OpenFile(targetPath, os.O_RDWR|os.O_CREATE, s.fileMode)
+	if err != nil {
+		return fmt.Errorf("failed to open file %q for locking: %w", targetPath, err)
+	}
+	defer lockFile.Close()
+
+	// Acquire exclusive lock
+	// If locking is not supported, fileLock returns (func(){}, nil) and we proceed
+	unlock, err := fileLock(int(lockFile.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock on %q: %w", targetPath, err)
+	}
+	defer unlock()
+
+	// Read current file contents through the locked file handle
+	var currentData []byte
+	stat, err := lockFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file %q: %w", targetPath, err)
+	}
+	if stat.Size() > 0 {
+		currentData = make([]byte, stat.Size())
+		if _, err := lockFile.ReadAt(currentData, 0); err != nil {
+			return fmt.Errorf("failed to read current file %q: %w", targetPath, err)
+		}
+	}
+
+	// Call updateFunc with current data
+	newData, err := updateFunc(currentData)
+	if err != nil {
+		return err
+	}
+
+	// Atomic write via temp file + rename
 	tmpFile, err := os.CreateTemp(dir, ".jubako-*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
@@ -151,7 +207,7 @@ func (s *Source) Save(ctx context.Context, data []byte) error {
 	}()
 
 	// Write data to temporary file
-	if _, err := tmpFile.Write(data); err != nil {
+	if _, err := tmpFile.Write(newData); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to write to temporary file: %w", err)
 	}
@@ -171,7 +227,7 @@ func (s *Source) Save(ctx context.Context, data []byte) error {
 		return fmt.Errorf("failed to set file permissions: %w", err)
 	}
 
-	// Atomic rename
+	// Atomic rename (lock is still held, ensuring exclusive access)
 	if err := os.Rename(tmpPath, targetPath); err != nil {
 		return fmt.Errorf("failed to rename temporary file to %q: %w", targetPath, err)
 	}

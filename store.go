@@ -8,8 +8,10 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/yacchi/jubako/container"
 	"github.com/yacchi/jubako/decoder"
 	"github.com/yacchi/jubako/document"
+	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
 )
 
@@ -96,6 +98,12 @@ type layerEntry struct {
 
 	// dirty indicates whether the layer has been modified but not yet saved
 	dirty bool
+
+	// data holds the cached data from Load()
+	data map[string]any
+
+	// changeset holds modifications since last Load/Save (for comment preservation)
+	changeset document.JSONPatchSet
 }
 
 // Name returns the unique identifier for this layer.
@@ -109,10 +117,10 @@ func (e *layerEntry) Priority() layer.Priority {
 }
 
 // Format returns the document format.
-// Returns empty string if the layer has not been loaded yet.
+// Returns empty string if the layer doesn't implement FormatProvider.
 func (e *layerEntry) Format() document.DocumentFormat {
-	if doc := e.layer.Document(); doc != nil {
-		return doc.Format()
+	if fp, ok := e.layer.(layer.FormatProvider); ok {
+		return fp.Format()
 	}
 	return ""
 }
@@ -125,7 +133,7 @@ func (e *layerEntry) Path() string {
 
 // Loaded returns whether the layer has been loaded.
 func (e *layerEntry) Loaded() bool {
-	return e.layer.Document() != nil
+	return e.data != nil
 }
 
 // ReadOnly returns whether the layer is marked as read-only.
@@ -284,12 +292,12 @@ func New[T any](opts ...StoreOption) *Store[T] {
 // Example:
 //
 //	// With explicit priority
-//	store.Add(layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()), WithPriority(jubako.PriorityDefaults))
-//	store.Add(layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()), WithPriority(jubako.PriorityUser))
+//	store.Add(layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()), WithPriority(jubako.PriorityDefaults))
+//	store.Add(layer.New("user", fs.New("~/.config/app.yaml"), yaml.New()), WithPriority(jubako.PriorityUser))
 //
 //	// Without priority (processed in addition order)
-//	store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.NewParser()))
-//	store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.NewParser()))
+//	store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.New()))
+//	store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 func (s *Store[T]) Add(l layer.Layer, opts ...AddOption) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -320,9 +328,9 @@ func (s *Store[T]) Add(l layer.Layer, opts ...AddOption) error {
 		readOnly: options.readOnly,
 	}
 
-	// Try to get file path from SourceParser's source
-	if sp, ok := l.(*layer.SourceParser); ok {
-		if pp, ok := sp.Source().(PathProvider); ok {
+	// Try to get file path from FileLayer's source
+	if fl, ok := l.(*layer.FileLayer); ok {
+		if pp, ok := fl.Source().(PathProvider); ok {
 			entry.path = pp.Path()
 		}
 	}
@@ -392,26 +400,27 @@ func (s *Store[T]) notifySubscribers() {
 // Example:
 //
 //	store := jubako.New[AppConfig]()
-//	store.Add(layer.New("defaults", bytes.FromString(defaultsYAML), yaml.NewParser()), WithPriority(jubako.PriorityDefaults))
-//	store.Add(layer.New("user", fs.New("~/.config/app.yaml"), yaml.NewParser()), WithPriority(jubako.PriorityUser))
+//	store.Add(layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()), WithPriority(jubako.PriorityDefaults))
+//	store.Add(layer.New("user", fs.New("~/.config/app.yaml"), yaml.New()), WithPriority(jubako.PriorityUser))
 //	if err := store.Load(context.Background()); err != nil {
 //	  log.Fatal(err)
 //	}
 func (s *Store[T]) Load(ctx context.Context) error {
 	s.mu.Lock()
 
-	// Load each layer's document
+	// Load each layer's data
 	for _, entry := range s.layers {
-		// Load document through the layer interface
-		_, err := entry.layer.Load(ctx)
+		// Load data through the layer interface
+		data, err := entry.layer.Load(ctx)
 		if err != nil {
 			s.mu.Unlock()
 			return fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
 		}
-	}
-
-	// Reloading from sources discards in-memory edits, so reset dirty flags.
-	for _, entry := range s.layers {
+		// Store the loaded data in the entry
+		entry.data = data
+		// Clear changeset as we have fresh data
+		entry.changeset = nil
+		// Clear dirty flag
 		entry.dirty = false
 	}
 
@@ -428,7 +437,9 @@ func (s *Store[T]) Load(ctx context.Context) error {
 }
 
 // Reload reloads all layers and re-materializes the configuration.
-// This is useful for implementing hot-reload functionality.
+// Unlike Load(), Reload preserves any uncommitted changesets and reapplies them
+// after loading fresh data from sources. This enables optimistic locking patterns
+// where local changes are preserved even when the underlying source changes.
 //
 // Example:
 //
@@ -436,11 +447,65 @@ func (s *Store[T]) Load(ctx context.Context) error {
 //	  log.Printf("Failed to reload config: %v", err)
 //	}
 func (s *Store[T]) Reload(ctx context.Context) error {
-	return s.Load(ctx)
+	s.mu.Lock()
+
+	// Save existing changesets before reloading
+	savedChangesets := make(map[layer.Name][]document.JSONPatch)
+	for _, entry := range s.layers {
+		if len(entry.changeset) > 0 {
+			savedChangesets[entry.layer.Name()] = entry.changeset
+		}
+	}
+
+	// Load each layer's data
+	for _, entry := range s.layers {
+		data, err := entry.layer.Load(ctx)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
+		}
+		// Store the loaded data in the entry
+		entry.data = data
+	}
+
+	// Reapply saved changesets
+	for _, entry := range s.layers {
+		changeset, exists := savedChangesets[entry.layer.Name()]
+		if !exists || len(changeset) == 0 {
+			entry.changeset = nil
+			entry.dirty = false
+			continue
+		}
+
+		// Reapply each patch operation
+		for _, patch := range changeset {
+			switch patch.Op {
+			case document.PatchOpAdd, document.PatchOpReplace:
+				jsonptr.SetPath(entry.data, patch.Path, patch.Value)
+			case document.PatchOpRemove:
+				jsonptr.DeletePath(entry.data, patch.Path)
+			}
+		}
+
+		// Restore the changeset and dirty flag
+		entry.changeset = changeset
+		entry.dirty = true
+	}
+
+	// Materialize the merged configuration
+	current, subscribers, err := s.materializeLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, sub := range subscribers {
+		sub.fn(current)
+	}
+	return nil
 }
 
 // SetTo sets a value in a specific layer at the given JSONPointer path.
-// The layer's document is updated in memory, but not persisted until Save() is called.
+// The layer's data is updated in memory, but not persisted until Save() is called.
 //
 // Example:
 //
@@ -451,7 +516,7 @@ func (s *Store[T]) Reload(ctx context.Context) error {
 //	}
 //
 //	// Save the change to disk
-//	err = store.Save(ctx, "user")
+//	err = store.SaveLayer(ctx, "user")
 func (s *Store[T]) SetTo(layerName layer.Name, path string, value any) error {
 	s.mu.Lock()
 
@@ -470,17 +535,33 @@ func (s *Store[T]) SetTo(layerName layer.Name, path string, value any) error {
 		return fmt.Errorf("layer %q does not support saving (source is not writable)", layerName)
 	}
 
-	doc := entry.layer.Document()
-	if doc == nil {
+	if entry.data == nil {
 		s.mu.Unlock()
 		return fmt.Errorf("layer %q has not been loaded", layerName)
 	}
 
-	// Set the value in the document
-	if err := doc.Set(path, value); err != nil {
+	// Set the value in the data map using jsonptr.SetPath
+	// SetResult tells us whether this was a create (add) or update (replace) operation
+	result := jsonptr.SetPath(entry.data, path, value)
+	if !result.Success {
 		s.mu.Unlock()
-		return fmt.Errorf("failed to set value in layer %q: %w", layerName, err)
+		return fmt.Errorf("failed to set value at path %q", path)
 	}
+
+	// Determine the patch operation based on SetResult
+	var op document.PatchOp
+	if result.Created {
+		op = document.PatchOpAdd
+	} else {
+		op = document.PatchOpReplace
+	}
+
+	// Record the change to changeset for comment preservation
+	entry.changeset = append(entry.changeset, document.JSONPatch{
+		Op:    op,
+		Path:  path,
+		Value: value,
+	})
 
 	// Mark the layer as dirty
 	entry.dirty = true
@@ -564,16 +645,17 @@ func (s *Store[T]) saveLayerLocked(ctx context.Context, entry *layerEntry) error
 		return fmt.Errorf("layer %q does not support saving", entry.layer.Name())
 	}
 
-	if entry.layer.Document() == nil {
+	if entry.data == nil {
 		return fmt.Errorf("layer %q has not been loaded", entry.layer.Name())
 	}
 
-	if err := entry.layer.Save(ctx); err != nil {
+	if err := entry.layer.Save(ctx, entry.changeset); err != nil {
 		return fmt.Errorf("failed to save layer %q: %w", entry.layer.Name(), err)
 	}
 
-	// Clear dirty flag on successful save
+	// Clear dirty flag and changeset on successful save
 	entry.dirty = false
+	entry.changeset = nil
 
 	return nil
 }
@@ -641,18 +723,17 @@ func (s *Store[T]) resolveContainerLocked(path string, topEntry *layerEntry) Res
 	// Merge values from all layers (lowest priority first)
 	var merged any
 	for _, entry := range entries {
-		doc := entry.layer.Document()
-		if doc == nil {
+		if entry.data == nil {
 			continue
 		}
 
-		value, ok := doc.Get(path)
+		value, ok := jsonptr.GetPath(entry.data, path)
 		if !ok {
 			continue
 		}
 
 		if merged == nil {
-			merged = deepCopyValue(value)
+			merged = container.DeepCopyValue(value)
 		} else {
 			// Merge this layer's value into merged
 			merged = mergeValues(merged, value)

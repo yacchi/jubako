@@ -76,8 +76,9 @@ func main() {
 	store := jubako.New[AppConfig]()
 
 	// Add default configuration layer (lowest priority)
+	// yaml.New() returns a stateless Document for YAML format handling
 	err := store.Add(
-		layer.New("defaults", bytes.FromString(defaultConfig), yaml.NewParser()),
+		layer.New("defaults", bytes.FromString(defaultConfig), yaml.New()),
 		jubako.WithPriority(jubako.PriorityDefaults),
 	)
 	if err != nil {
@@ -90,7 +91,7 @@ func main() {
 
 	// Add user configuration layer (higher priority)
 	err = store.Add(
-		layer.New("user", fs.New(userConfigPath), yaml.NewParser()),
+		layer.New("user", fs.New(userConfigPath), yaml.New()),
 		jubako.WithPriority(jubako.PriorityUser),
 	)
 	if err != nil {

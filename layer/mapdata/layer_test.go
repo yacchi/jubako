@@ -4,6 +4,8 @@ import (
 	"context"
 	"reflect"
 	"testing"
+
+	"github.com/yacchi/jubako/document"
 )
 
 func TestNew(t *testing.T) {
@@ -23,12 +25,26 @@ func TestNew(t *testing.T) {
 			t.Errorf("Name() = %q, want %q", l.Name(), "test")
 		}
 	})
+
+	t.Run("deep copies input data", func(t *testing.T) {
+		data := map[string]any{"key": "original"}
+		l := New("test", data)
+
+		// Modify original data
+		data["key"] = "modified"
+
+		// Layer data should still have original value
+		layerData := l.Data()
+		if layerData["key"] != "original" {
+			t.Errorf("Layer data was modified by external change: got %v", layerData["key"])
+		}
+	})
 }
 
 func TestLayer_Load(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("loads data into document", func(t *testing.T) {
+	t.Run("loads data as map", func(t *testing.T) {
 		data := map[string]any{
 			"server": map[string]any{
 				"host": "localhost",
@@ -37,40 +53,40 @@ func TestLayer_Load(t *testing.T) {
 		}
 		l := New("test", data)
 
-		doc, err := l.Load(ctx)
+		result, err := l.Load(ctx)
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
-		if doc == nil {
-			t.Fatal("Load() returned nil document")
+		if result == nil {
+			t.Fatal("Load() returned nil")
 		}
 
-		// Verify document content
-		val, ok := doc.Get("/server/host")
+		// Verify content
+		server, ok := result["server"].(map[string]any)
 		if !ok {
-			t.Error("Get(/server/host) not found")
+			t.Fatal("result[server] is not a map")
 		}
-		if val != "localhost" {
-			t.Errorf("Get(/server/host) = %v, want %q", val, "localhost")
+		if server["host"] != "localhost" {
+			t.Errorf("server[host] = %v, want localhost", server["host"])
 		}
 	})
 
-	t.Run("deep copies data", func(t *testing.T) {
+	t.Run("returns deep copy", func(t *testing.T) {
 		data := map[string]any{"key": "original"}
 		l := New("test", data)
 
-		_, err := l.Load(ctx)
+		result, err := l.Load(ctx)
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
 
-		// Modify original data
-		data["key"] = "modified"
+		// Modify result
+		result["key"] = "modified"
 
-		// Document should still have original value
-		val, _ := l.Document().Get("/key")
-		if val != "original" {
-			t.Errorf("Document data was modified by external change: got %v", val)
+		// Original layer data should be unchanged
+		layerData := l.Data()
+		if layerData["key"] != "original" {
+			t.Errorf("Layer data was modified by changing Load() result: got %v", layerData["key"])
 		}
 	})
 
@@ -87,23 +103,16 @@ func TestLayer_Load(t *testing.T) {
 	})
 }
 
-func TestLayer_Document(t *testing.T) {
-	t.Run("returns nil before load", func(t *testing.T) {
-		l := New("test", map[string]any{"key": "value"})
+func TestLayer_Data(t *testing.T) {
+	t.Run("returns deep copy", func(t *testing.T) {
+		l := New("test", map[string]any{"key": "original"})
 
-		if l.Document() != nil {
-			t.Error("Document() should return nil before Load()")
-		}
-	})
+		data := l.Data()
+		data["key"] = "modified"
 
-	t.Run("returns document after load", func(t *testing.T) {
-		ctx := context.Background()
-		l := New("test", map[string]any{"key": "value"})
-
-		l.Load(ctx)
-
-		if l.Document() == nil {
-			t.Error("Document() should return document after Load()")
+		// Original should be unchanged
+		if l.Data()["key"] != "original" {
+			t.Error("Data() should return a deep copy")
 		}
 	})
 }
@@ -112,21 +121,29 @@ func TestLayer_Save(t *testing.T) {
 	ctx := context.Background()
 	l := New("test", map[string]any{"key": "value"})
 
-	_, err := l.Load(ctx)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+	// Save should apply changeset to internal data
+	changeset := document.JSONPatchSet{
+		document.NewReplacePatch("/key", "new"),
+		document.NewAddPatch("/extra", "data"),
 	}
-
-	// Save should succeed (no-op for in-memory data)
-	err = l.Save(ctx)
+	err := l.Save(ctx, changeset)
 	if err != nil {
 		t.Errorf("Save() error = %v, want nil", err)
+	}
+
+	// Verify data was updated
+	data := l.Data()
+	if data["key"] != "new" {
+		t.Errorf("data[key] = %v, want new", data["key"])
+	}
+	if data["extra"] != "data" {
+		t.Errorf("data[extra] = %v, want data", data["extra"])
 	}
 
 	// Save should respect context cancellation
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	err = l.Save(canceledCtx)
+	err = l.Save(canceledCtx, nil)
 	if err == nil {
 		t.Error("Save() should return error with canceled context")
 	}
@@ -140,174 +157,23 @@ func TestLayer_CanSave(t *testing.T) {
 	}
 }
 
-func TestDocument_Get(t *testing.T) {
-	data := map[string]any{
-		"server": map[string]any{
-			"host": "localhost",
-			"port": 8080,
-		},
-		"debug": true,
-	}
-	doc := NewDocument(data)
+func TestLayer_SaveWithChangeset(t *testing.T) {
+	ctx := context.Background()
+	l := New("test", map[string]any{"key": "value"})
 
-	tests := []struct {
-		path   string
-		want   any
-		wantOk bool
-	}{
-		{"/server/host", "localhost", true},
-		{"/server/port", 8080, true},
-		{"/debug", true, true},
-		{"/server", map[string]any{"host": "localhost", "port": 8080}, true},
-		{"/nonexistent", nil, false},
-		{"/server/nonexistent", nil, false},
-		{"", data, true},
-		{"/", data, true},
+	// Changeset should be applied to mapdata layers
+	changeset := document.JSONPatchSet{
+		document.NewReplacePatch("/key", "new"),
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got, ok := doc.Get(tt.path)
-			if ok != tt.wantOk {
-				t.Errorf("Get(%q) ok = %v, want %v", tt.path, ok, tt.wantOk)
-			}
-			if tt.wantOk && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Get(%q) = %v, want %v", tt.path, got, tt.want)
-			}
-		})
+	err := l.Save(ctx, changeset)
+	if err != nil {
+		t.Errorf("Save() with changeset error = %v, want nil", err)
 	}
-}
 
-func TestDocument_Set(t *testing.T) {
-	t.Run("sets existing value", func(t *testing.T) {
-		doc := NewDocument(map[string]any{"key": "old"})
-
-		err := doc.Set("/key", "new")
-		if err != nil {
-			t.Fatalf("Set() error = %v", err)
-		}
-
-		val, _ := doc.Get("/key")
-		if val != "new" {
-			t.Errorf("Get(/key) = %v, want %q", val, "new")
-		}
-	})
-
-	t.Run("creates nested path", func(t *testing.T) {
-		doc := NewDocument(map[string]any{})
-
-		err := doc.Set("/server/host", "localhost")
-		if err != nil {
-			t.Fatalf("Set() error = %v", err)
-		}
-
-		val, ok := doc.Get("/server/host")
-		if !ok {
-			t.Error("Get(/server/host) not found")
-		}
-		if val != "localhost" {
-			t.Errorf("Get(/server/host) = %v, want %q", val, "localhost")
-		}
-	})
-
-	t.Run("rejects empty path", func(t *testing.T) {
-		doc := NewDocument(map[string]any{})
-
-		err := doc.Set("", "value")
-		if err == nil {
-			t.Error("Set() should return error for empty path")
-		}
-	})
-}
-
-func TestDocument_Delete(t *testing.T) {
-	t.Run("deletes existing key", func(t *testing.T) {
-		doc := NewDocument(map[string]any{"key": "value", "other": "data"})
-
-		err := doc.Delete("/key")
-		if err != nil {
-			t.Fatalf("Delete() error = %v", err)
-		}
-
-		_, ok := doc.Get("/key")
-		if ok {
-			t.Error("Get(/key) should return false after delete")
-		}
-
-		// Other key should still exist
-		val, ok := doc.Get("/other")
-		if !ok || val != "data" {
-			t.Error("Delete should not affect other keys")
-		}
-	})
-
-	t.Run("deletes nested key", func(t *testing.T) {
-		doc := NewDocument(map[string]any{
-			"server": map[string]any{
-				"host": "localhost",
-				"port": 8080,
-			},
-		})
-
-		err := doc.Delete("/server/port")
-		if err != nil {
-			t.Fatalf("Delete() error = %v", err)
-		}
-
-		_, ok := doc.Get("/server/port")
-		if ok {
-			t.Error("Get(/server/port) should return false after delete")
-		}
-
-		// Host should still exist
-		val, ok := doc.Get("/server/host")
-		if !ok || val != "localhost" {
-			t.Error("Delete should not affect sibling keys")
-		}
-	})
-
-	t.Run("idempotent for nonexistent key", func(t *testing.T) {
-		doc := NewDocument(map[string]any{"key": "value"})
-
-		err := doc.Delete("/nonexistent")
-		if err != nil {
-			t.Errorf("Delete() should be idempotent, got error = %v", err)
-		}
-	})
-
-	t.Run("rejects empty path", func(t *testing.T) {
-		doc := NewDocument(map[string]any{})
-
-		err := doc.Delete("")
-		if err == nil {
-			t.Error("Delete() should return error for empty path")
-		}
-	})
-}
-
-func TestDocument_Format(t *testing.T) {
-	doc := NewDocument(map[string]any{})
-
-	if doc.Format() != "mapdata" {
-		t.Errorf("Format() = %q, want %q", doc.Format(), "mapdata")
-	}
-}
-
-func TestDocument_Marshal(t *testing.T) {
-	doc := NewDocument(map[string]any{"key": "value"})
-
-	_, err := doc.Marshal()
-	if err == nil {
-		t.Error("Marshal() should return error")
-	}
-}
-
-func TestDocument_MarshalTestData(t *testing.T) {
-	doc := NewDocument(map[string]any{})
-
-	_, err := doc.MarshalTestData(map[string]any{"key": "value"})
-	if err == nil {
-		t.Error("MarshalTestData() should return error")
+	// Data should reflect the changeset
+	if l.Data()["key"] != "new" {
+		t.Errorf("data[key] = %v, want new", l.Data()["key"])
 	}
 }
 
@@ -321,7 +187,8 @@ func TestDeepCopy(t *testing.T) {
 			},
 		}
 
-		copied := deepCopyMap(original)
+		l := New("test", original)
+		copied := l.Data()
 
 		// Modify original
 		original["level1"].(map[string]any)["level2"].(map[string]any)["value"] = "modified"
@@ -338,7 +205,8 @@ func TestDeepCopy(t *testing.T) {
 			"items": []any{"a", "b", "c"},
 		}
 
-		copied := deepCopyMap(original)
+		l := New("test", original)
+		copied := l.Data()
 
 		// Modify original slice
 		original["items"].([]any)[0] = "modified"
@@ -349,11 +217,18 @@ func TestDeepCopy(t *testing.T) {
 			t.Errorf("Deep copy slice was affected by modification: got %v", val)
 		}
 	})
+}
 
-	t.Run("handles nil", func(t *testing.T) {
-		copied := deepCopyMap(nil)
-		if copied != nil {
-			t.Error("deepCopyMap(nil) should return nil")
-		}
-	})
+func TestLayer_EmptyData(t *testing.T) {
+	l := New("test", nil)
+	ctx := context.Background()
+
+	result, err := l.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(result, map[string]any{}) {
+		t.Errorf("Load() = %v, want empty map", result)
+	}
 }

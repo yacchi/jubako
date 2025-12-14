@@ -55,7 +55,7 @@ func (s *Source) Load(ctx context.Context) ([]byte, error) {
 
 // Save implements the source.Source interface.
 // This source does not support saving and always returns ErrSaveNotSupported.
-func (s *Source) Save(ctx context.Context, data []byte) error {
+func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	return source.ErrSaveNotSupported
 }
 

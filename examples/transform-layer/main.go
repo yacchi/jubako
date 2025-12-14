@@ -6,8 +6,8 @@
 // - Migrating between different key naming conventions
 // - Providing backwards compatibility during refactoring
 //
-// The TransformLayer wraps an existing layer and transforms paths for
-// Get, Set, and Delete operations, allowing code to use a canonical path
+// The TransformLayer wraps an existing layer and transforms data for
+// Load and Save operations, allowing code to use a canonical path
 // format while the underlying document uses a different structure.
 //
 // Run with: go run ./examples/transform-layer
@@ -43,9 +43,9 @@ func main() {
 
 	fmt.Println()
 
-	// Example 3: Demonstrate direct document access with transformation
-	fmt.Println("--- Example 3: Direct Document Access ---")
-	demonstrateDirectAccess()
+	// Example 3: Demonstrate transformation in action
+	fmt.Println("--- Example 3: Transformation Details ---")
+	demonstrateTransformation()
 }
 
 func runWithConfig(name, configData string, mappings []PathMapping) {
@@ -53,7 +53,7 @@ func runWithConfig(name, configData string, mappings []PathMapping) {
 	store := jubako.New[AppConfig]()
 
 	// Create the base layer
-	baseLayer := layer.New(layer.Name(name), bytes.FromString(configData), yaml.NewParser())
+	baseLayer := layer.New(layer.Name(name), bytes.FromString(configData), yaml.New())
 
 	// Wrap with transform layer if mappings are provided
 	var layerToAdd layer.Layer = baseLayer
@@ -86,53 +86,35 @@ func runWithConfig(name, configData string, mappings []PathMapping) {
 	}
 }
 
-func demonstrateDirectAccess() {
+func demonstrateTransformation() {
 	ctx := context.Background()
 
 	// Create v1 layer with transformation
-	baseLayer := layer.New("v1-config", bytes.FromString(v1Config), yaml.NewParser())
+	baseLayer := layer.New("v1-config", bytes.FromString(v1Config), yaml.New())
 	transformLayer := NewTransformLayer(baseLayer, v1ToV2Mappings)
 
-	// Load the layer
-	doc, err := transformLayer.Load(ctx)
+	// Load the layer - data is automatically transformed
+	data, err := transformLayer.Load(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Access using canonical (v2) paths
-	fmt.Println("Reading with canonical paths:")
-	if val, ok := doc.Get("/database/host"); ok {
-		fmt.Printf("  /database/host = %v\n", val)
+	// Show that data uses canonical (v2) paths
+	fmt.Println("Loaded data (transformed to canonical format):")
+	if database, ok := data["database"].(map[string]any); ok {
+		fmt.Printf("  database.host = %v\n", database["host"])
+		fmt.Printf("  database.port = %v\n", database["port"])
+		fmt.Printf("  database.name = %v\n", database["name"])
+		fmt.Printf("  database.user = %v\n", database["user"])
 	}
-	if val, ok := doc.Get("/database/port"); ok {
-		fmt.Printf("  /database/port = %v\n", val)
-	}
-	if val, ok := doc.Get("/server/host"); ok {
-		fmt.Printf("  /server/host = %v\n", val)
-	}
-
-	// Write using canonical path (writes to v1 structure)
-	fmt.Println("\nModifying /database/port to 5433...")
-	if err := doc.Set("/database/port", 5433); err != nil {
-		log.Fatal(err)
+	if server, ok := data["server"].(map[string]any); ok {
+		fmt.Printf("  server.host = %v\n", server["host"])
+		fmt.Printf("  server.port = %v\n", server["port"])
 	}
 
-	// Verify the change
-	if val, ok := doc.Get("/database/port"); ok {
-		fmt.Printf("  /database/port = %v (after modification)\n", val)
+	// Show path mappings used
+	fmt.Println("\nPath mappings (v1 -> v2):")
+	for _, m := range v1ToV2Mappings {
+		fmt.Printf("  %s -> %s\n", m.Source, m.Canonical)
 	}
-
-	// Show that the underlying v1 structure was modified
-	innerDoc := baseLayer.Document()
-	if val, ok := innerDoc.Get("/db/port"); ok {
-		fmt.Printf("  Underlying /db/port = %v\n", val)
-	}
-
-	// Marshal to show the v1 format is preserved
-	data, err := doc.Marshal()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("\nSerialized v1 config (comments preserved):")
-	fmt.Println(string(data))
 }
