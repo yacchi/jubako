@@ -2,13 +2,18 @@ package jubako
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/yacchi/jubako/document"
+	jjson "github.com/yacchi/jubako/format/json"
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/layer/mapdata"
+	"github.com/yacchi/jubako/source"
 )
 
 type testConfig struct {
@@ -869,5 +874,855 @@ func TestStore_ListLayers(t *testing.T) {
 	}
 	if !layers[1].Loaded() {
 		t.Error("layers[1].Loaded = false, want true")
+	}
+}
+
+// Helper types for additional Store tests
+
+type noSaveLayer struct{ name layer.Name }
+
+func (l *noSaveLayer) Name() layer.Name { return l.name }
+func (l *noSaveLayer) Load(ctx context.Context) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"a": 1}, nil
+}
+func (l *noSaveLayer) Save(context.Context, document.JSONPatchSet) error {
+	return source.ErrSaveNotSupported
+}
+func (l *noSaveLayer) CanSave() bool { return false }
+
+type pathMemSource struct {
+	path    string
+	data    []byte
+	canSave bool
+}
+
+func (s *pathMemSource) Path() string { return s.path }
+func (s *pathMemSource) Load(ctx context.Context) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	b := make([]byte, len(s.data))
+	copy(b, s.data)
+	return b, nil
+}
+func (s *pathMemSource) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !s.canSave {
+		return source.ErrSaveNotSupported
+	}
+	newData, err := updateFunc(s.data)
+	if err != nil {
+		return err
+	}
+	s.data = newData
+	return nil
+}
+func (s *pathMemSource) CanSave() bool { return s.canSave }
+
+type failingSaveLayer struct{ name layer.Name }
+
+func (l *failingSaveLayer) Name() layer.Name { return l.name }
+func (l *failingSaveLayer) Load(ctx context.Context) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"a": 1}, nil
+}
+func (l *failingSaveLayer) Save(context.Context, document.JSONPatchSet) error {
+	return errors.New("save error")
+}
+func (l *failingSaveLayer) CanSave() bool { return true }
+
+type nilDataLayer struct{ name layer.Name }
+
+func (l *nilDataLayer) Name() layer.Name { return l.name }
+func (l *nilDataLayer) Load(ctx context.Context) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+func (l *nilDataLayer) Save(context.Context, document.JSONPatchSet) error { return nil }
+func (l *nilDataLayer) CanSave() bool                                     { return true }
+
+func TestStore_ReadOnlyAndLayerInfo(t *testing.T) {
+	ctx := context.Background()
+	store := New[map[string]any]()
+
+	if err := store.Add(mapdata.New("ro", map[string]any{"a": 1}), WithReadOnly()); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	info := store.GetLayerInfo("ro")
+	if info == nil {
+		t.Fatal("GetLayerInfo() returned nil")
+	}
+	if got := info.Format(); got != "" {
+		t.Fatalf("Format() = %q, want empty string for non-format layers", got)
+	}
+	if !info.ReadOnly() {
+		t.Fatal("ReadOnly() = false, want true")
+	}
+	if info.Writable() {
+		t.Fatal("Writable() = true, want false")
+	}
+	if info.Dirty() {
+		t.Fatal("Dirty() = true, want false")
+	}
+
+	if err := store.SetTo("ro", "/a", 2); err == nil {
+		t.Fatal("SetTo() on read-only layer expected error, got nil")
+	}
+}
+
+func TestStore_WithDecoder_AndSaveDirty(t *testing.T) {
+	ctx := context.Background()
+	var decoderCalls int
+	store := New[testConfig](WithDecoder(func(data map[string]any, target any) error {
+		decoderCalls++
+		m, ok := target.(*testConfig)
+		if !ok {
+			return errors.New("unexpected target type")
+		}
+		m.Host, _ = data["host"].(string)
+		if port, ok := data["port"].(int); ok {
+			m.Port = port
+		} else if port, ok := data["port"].(float64); ok {
+			m.Port = int(port)
+		}
+		return nil
+	}))
+
+	l := mapdata.New("user", map[string]any{"host": "h", "port": 1})
+	if err := store.Add(l, WithPriority(PriorityUser)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if decoderCalls == 0 {
+		t.Fatal("expected decoder to be called at least once")
+	}
+
+	if store.IsDirty() {
+		t.Fatal("IsDirty() = true, want false")
+	}
+	if err := store.SetTo("user", "/port", 2); err != nil {
+		t.Fatalf("SetTo() error = %v", err)
+	}
+	if !store.IsDirty() {
+		t.Fatal("IsDirty() = false, want true")
+	}
+
+	// Save all dirty layers.
+	if err := store.Save(ctx); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if store.IsDirty() {
+		t.Fatal("IsDirty() = true after Save, want false")
+	}
+
+	// SaveLayer on a missing layer.
+	if err := store.SaveLayer(ctx, "missing"); err == nil {
+		t.Fatal("SaveLayer(missing) expected error, got nil")
+	}
+}
+
+func TestStore_Load_DecodeError(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig](WithDecoder(func(map[string]any, any) error {
+		return errors.New("decode error")
+	}))
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h"})); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err == nil {
+		t.Fatal("Load() expected error, got nil")
+	}
+}
+
+func TestStore_SaveLayer_ErrorPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("layer not loaded", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(mapdata.New("user", map[string]any{"host": "h"})); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.SaveLayer(ctx, "user"); err == nil {
+			t.Fatal("SaveLayer() expected error, got nil")
+		}
+	})
+
+	t.Run("layer does not support saving", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(&noSaveLayer{name: "nosave"}); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if err := store.SaveLayer(ctx, "nosave"); err == nil {
+			t.Fatal("SaveLayer() expected error, got nil")
+		}
+	})
+}
+
+func TestStore_Reload_ReappliesChangeset(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1}), WithPriority(PriorityUser)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Add(mapdata.New("other", map[string]any{"host": "other"}), WithPriority(PriorityDefaults)); err != nil {
+		t.Fatalf("Add(other) error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := store.SetTo("user", "/port", 2); err != nil {
+		t.Fatalf("SetTo() error = %v", err)
+	}
+
+	// Reload should preserve the in-memory changeset and reapply it.
+	if err := store.Reload(ctx); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if got := store.Get().Port; got != 2 {
+		t.Fatalf("after Reload, Port = %d, want 2", got)
+	}
+}
+
+func TestStore_Reload_ReappliesRemovePatch(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1}), WithPriority(PriorityUser)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	store.mu.Lock()
+	entry := store.findLayerLocked("user")
+	entry.changeset = []document.JSONPatch{
+		{Op: document.PatchOpRemove, Path: "/host"},
+	}
+	entry.dirty = true
+	store.mu.Unlock()
+
+	if err := store.Reload(ctx); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if got := store.Get().Host; got != "" {
+		t.Fatalf("after Reload remove, Host = %q, want empty", got)
+	}
+}
+
+func TestStore_Reload_ReappliesAddPatch(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1}), WithPriority(PriorityUser)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// Create a new key so the changeset contains an "add" operation.
+	if err := store.SetTo("user", "/new_key", "x"); err != nil {
+		t.Fatalf("SetTo() error = %v", err)
+	}
+
+	if err := store.Reload(ctx); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+}
+
+func TestStore_Reload_NotifiesSubscribers(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1}), WithPriority(PriorityUser)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	called := 0
+	unsub := store.Subscribe(func(testConfig) { called++ })
+	defer unsub()
+
+	if err := store.Reload(ctx); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if called == 0 {
+		t.Fatal("expected subscriber to be called on Reload")
+	}
+}
+
+func TestStore_Reload_MaterializeError(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1}), WithPriority(PriorityUser)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	store.mu.Lock()
+	store.decoder = func(map[string]any, any) error { return errors.New("decode error") }
+	store.mu.Unlock()
+
+	if err := store.Reload(ctx); err == nil {
+		t.Fatal("Reload() expected error, got nil")
+	}
+}
+
+func TestStore_Save_NoDirty(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h"})); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := store.Save(ctx); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+}
+
+func TestStore_Save_ErrorFromLayer(t *testing.T) {
+	ctx := context.Background()
+	store := New[map[string]any]()
+	if err := store.Add(&failingSaveLayer{name: "bad"}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := store.SetTo("bad", "/a", 2); err != nil {
+		t.Fatalf("SetTo() error = %v", err)
+	}
+	if err := store.Save(ctx); err == nil {
+		t.Fatal("Save() expected error, got nil")
+	}
+	if !store.IsDirty() {
+		t.Fatal("IsDirty() = false after failed Save, want true")
+	}
+}
+
+func TestStore_SetTo_ErrorPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("missing layer", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.SetTo("missing", "/a", 1); err == nil {
+			t.Fatal("SetTo(missing) expected error, got nil")
+		}
+	})
+
+	t.Run("layer not loaded", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(mapdata.New("user", map[string]any{"a": 1})); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.SetTo("user", "/a", 2); err == nil {
+			t.Fatal("SetTo() expected error, got nil")
+		}
+	})
+
+	t.Run("layer not writable", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(&noSaveLayer{name: "nosave"}); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if err := store.SetTo("nosave", "/a", 2); err == nil {
+			t.Fatal("SetTo() expected error, got nil")
+		}
+	})
+
+	t.Run("invalid pointer", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(mapdata.New("user", map[string]any{"a": 1})); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if err := store.SetTo("user", "relative/path", 2); err == nil {
+			t.Fatal("SetTo(relative) expected error, got nil")
+		}
+		if err := store.SetTo("user", "", 2); err == nil {
+			t.Fatal("SetTo(empty) expected error, got nil")
+		}
+	})
+
+	t.Run("created vs replaced", func(t *testing.T) {
+		store := New[map[string]any]()
+		if err := store.Add(mapdata.New("user", map[string]any{"a": 1})); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if err := store.SetTo("user", "/b", 2); err != nil {
+			t.Fatalf("SetTo(create) error = %v", err)
+		}
+		if err := store.SetTo("user", "/b", 3); err != nil {
+			t.Fatalf("SetTo(replace) error = %v", err)
+		}
+	})
+}
+
+func TestStore_SetTo_MaterializeError(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1})); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	store.mu.Lock()
+	store.decoder = func(map[string]any, any) error { return errors.New("decode error") }
+	store.mu.Unlock()
+
+	if err := store.SetTo("user", "/host", "x"); err == nil {
+		t.Fatal("SetTo() expected error, got nil")
+	}
+}
+
+func TestStore_GetLayer_GetAtContainers_GetAllAt(t *testing.T) {
+	ctx := context.Background()
+	store := New[map[string]any]()
+
+	if err := store.Add(mapdata.New("base", map[string]any{
+		"server": map[string]any{"host": "a", "port": 1},
+		"items":  []any{"a"},
+		"complex": []any{
+			map[string]any{"x": 1},
+			[]any{"y"},
+			"z",
+		},
+	}), WithPriority(0)); err != nil {
+		t.Fatalf("Add(base) error = %v", err)
+	}
+	if err := store.Add(mapdata.New("override", map[string]any{
+		"server": map[string]any{"port": 2},
+		"items":  []any{"b"},
+	}), WithPriority(10)); err != nil {
+		t.Fatalf("Add(override) error = %v", err)
+	}
+
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !store.origins.isContainer("/server") {
+		t.Fatal("origins.isContainer(/server) = false, want true")
+	}
+
+	// GetLayer returns the registered layer.
+	if got := store.GetLayer("base"); got == nil {
+		t.Fatal("GetLayer(base) = nil")
+	}
+	if got := store.GetLayer("missing"); got != nil {
+		t.Fatal("GetLayer(missing) != nil")
+	}
+
+	// Container GetAt merges maps across layers and uses highest-priority origin.
+	rv := store.GetAt("/server")
+	if !rv.Exists {
+		t.Fatal("GetAt(/server) Exists=false, want true")
+	}
+	gotMap, ok := rv.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("GetAt(/server).Value is %T, want map[string]any", rv.Value)
+	}
+	wantMap := map[string]any{"host": "a", "port": 2}
+	if !reflect.DeepEqual(gotMap, wantMap) {
+		t.Fatalf("GetAt(/server) = %#v, want %#v", gotMap, wantMap)
+	}
+	if rv.Layer == nil || rv.Layer.Name() != "override" {
+		t.Fatalf("origin layer = %v, want %q", rv.Layer, "override")
+	}
+
+	// Slice containers replace on higher priority.
+	rv = store.GetAt("/items")
+	if !rv.Exists {
+		t.Fatal("GetAt(/items) Exists=false, want true")
+	}
+	if !reflect.DeepEqual(rv.Value, []any{"b"}) {
+		t.Fatalf("GetAt(/items) = %#v, want %#v", rv.Value, []any{"b"})
+	}
+
+	// GetAllAt returns values from all contributing layers (leaf and container paths).
+	all := store.GetAllAt("/server/port")
+	if all.Len() != 2 {
+		t.Fatalf("GetAllAt(/server/port).Len() = %d, want 2", all.Len())
+	}
+	if eff := all.Effective(); !eff.Exists || eff.Layer.Name() != "override" {
+		t.Fatalf("Effective() = %#v", eff)
+	}
+
+	all = store.GetAllAt("/server")
+	if all.Len() != 2 {
+		t.Fatalf("GetAllAt(/server).Len() = %d, want 2", all.Len())
+	}
+
+	if got := store.GetAllAt("/missing"); got != nil {
+		t.Fatalf("GetAllAt(/missing) = %#v, want nil", got)
+	}
+}
+
+func TestStore_LayerInfo_FormatAndPath(t *testing.T) {
+	ctx := context.Background()
+	store := New[map[string]any]()
+
+	src := &pathMemSource{
+		path:    "/tmp/config.json",
+		data:    []byte("{\"a\": 1}\n"),
+		canSave: true,
+	}
+	doc := jjson.New()
+	if err := store.Add(layer.New("file", src, doc)); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	info := store.GetLayerInfo("file")
+	if info == nil {
+		t.Fatal("GetLayerInfo() returned nil")
+	}
+	if got := info.Path(); got != "/tmp/config.json" {
+		t.Fatalf("Path() = %q, want %q", got, "/tmp/config.json")
+	}
+	if got := info.Format(); got != document.FormatJSON {
+		t.Fatalf("Format() = %q, want %q", got, document.FormatJSON)
+	}
+	if !info.Writable() {
+		t.Fatal("Writable() = false, want true")
+	}
+}
+
+func TestOriginsAndResolvedValues_EdgeCases(t *testing.T) {
+	var o *origin
+	if got := o.get(); got != nil {
+		t.Fatalf("(*origin)(nil).get() = %v, want nil", got)
+	}
+	if got := o.getAll(); got != nil {
+		t.Fatalf("(*origin)(nil).getAll() = %v, want nil", got)
+	}
+
+	if got := (ResolvedValues(nil)).Effective(); got.Exists {
+		t.Fatalf("ResolvedValues(nil).Effective() = %#v, want empty", got)
+	}
+
+	if got := newResolvedValue(nil, "/a"); got.Exists {
+		t.Fatalf("newResolvedValue(nil) = %#v, want empty", got)
+	}
+	entry := &layerEntry{data: nil}
+	if got := newResolvedValue(entry, "/a"); got.Exists {
+		t.Fatalf("newResolvedValue(data=nil) = %#v, want empty", got)
+	}
+	entry = &layerEntry{data: map[string]any{"a": 1}}
+	if got := newResolvedValue(entry, "/missing"); got.Exists {
+		t.Fatalf("newResolvedValue(missing path) = %#v, want empty", got)
+	}
+
+	o2 := newOrigins()
+	if got := o2.getAllContainer("/missing"); got != nil {
+		t.Fatalf("getAllContainer(/missing) = %#v, want nil", got)
+	}
+	if got := o2.isContainer("/missing"); got {
+		t.Fatalf("isContainer(/missing) = true, want false")
+	}
+}
+
+func TestStore_GetLayerInfo_NotFound(t *testing.T) {
+	store := New[testConfig]()
+	if got := store.GetLayerInfo("missing"); got != nil {
+		t.Fatalf("GetLayerInfo(missing) = %v, want nil", got)
+	}
+}
+
+func TestStore_LoadReload_ErrorPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Load error from layer", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(&noSaveLayer{name: "bad"}); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		// Force an error from Load via canceled context.
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := store.Load(canceled); err == nil {
+			t.Fatal("Load() expected error, got nil")
+		}
+	})
+
+	t.Run("Reload error from layer", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(mapdata.New("ok", map[string]any{"host": "h"})); err != nil {
+			t.Fatalf("Add(ok) error = %v", err)
+		}
+		if err := store.Add(&noSaveLayer{name: "bad"}); err != nil {
+			t.Fatalf("Add(bad) error = %v", err)
+		}
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := store.Reload(canceled); err == nil {
+			t.Fatal("Reload() expected error, got nil")
+		}
+	})
+}
+
+func TestMappingTable_IsEmpty_NilReceiver(t *testing.T) {
+	var t0 *MappingTable
+	if !t0.IsEmpty() {
+		t.Fatal("(*MappingTable)(nil).IsEmpty() = false, want true")
+	}
+}
+
+func TestMappingTable_String_NilReceiver(t *testing.T) {
+	var t0 *MappingTable
+	if got, want := t0.String(), "(no mappings)"; got != want {
+		t.Fatalf("(*MappingTable)(nil).String() = %q, want %q", got, want)
+	}
+}
+
+func TestParseJubakoTag(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantPath string
+		wantRel  bool
+	}{
+		{"", "", false},
+		{"/a/b", "/a/b", false},
+		{"a/b", "/a/b", true},
+		{"./a/b", "/a/b", true},
+		{"a/b,option", "/a/b", true},
+	}
+	for _, tt := range tests {
+		gotPath, gotRel := parseJubakoTag(tt.in)
+		if gotPath != tt.wantPath || gotRel != tt.wantRel {
+			t.Fatalf("parseJubakoTag(%q) = (%q, %v), want (%q, %v)", tt.in, gotPath, gotRel, tt.wantPath, tt.wantRel)
+		}
+	}
+}
+
+func TestWalkContext_AllValues_EmptyOrigin(t *testing.T) {
+	c := WalkContext{Path: "/x", origin: &origin{}}
+	if got := c.AllValues(); got != nil {
+		t.Fatalf("AllValues() = %#v, want nil", got)
+	}
+}
+
+func TestWalkContext_ValueAndAllValues(t *testing.T) {
+	ctx := context.Background()
+	store := New[map[string]any]()
+
+	if err := store.Add(mapdata.New("base", map[string]any{"a": nil}), WithPriority(0)); err != nil {
+		t.Fatalf("Add(base) error = %v", err)
+	}
+	if err := store.Add(mapdata.New("override", map[string]any{"a": "x"}), WithPriority(10)); err != nil {
+		t.Fatalf("Add(override) error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	var saw bool
+	store.Walk(func(c WalkContext) bool {
+		if c.Path != "/a" {
+			return true
+		}
+		saw = true
+
+		// Exercise ResolvedValue helpers via WalkContext.Value().
+		v := c.Value()
+		if !v.HasValue() {
+			t.Fatalf("Value().HasValue() = false, want true")
+		}
+		if v.IsNull() {
+			t.Fatalf("Value().IsNull() = true, want false")
+		}
+		if v.IsMissing() {
+			t.Fatalf("Value().IsMissing() = true, want false")
+		}
+
+		// Exercise WalkContext.AllValues() and Effective().
+		all := c.AllValues()
+		if all.Len() != 2 {
+			t.Fatalf("AllValues().Len() = %d, want 2", all.Len())
+		}
+		if eff := all.Effective(); eff.Layer == nil || eff.Layer.Name() != "override" {
+			t.Fatalf("Effective() = %#v", eff)
+		}
+		return false
+	})
+	if !saw {
+		t.Fatal("did not observe expected path in Walk")
+	}
+}
+
+func TestParseJSONTagKey(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"name", "name"},
+		{"name,omitempty", "name"},
+		{"-", "-"},
+	}
+	for _, tt := range tests {
+		if got := parseJSONTagKey(tt.in); got != tt.want {
+			t.Fatalf("parseJSONTagKey(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestBuildMappingTable_ComplexTypes(t *testing.T) {
+	type inner struct {
+		Value string `json:"value" jubako:"./x"`
+	}
+	type cfg struct {
+		A       string            `json:"a" jubako:"/root/a"`
+		B       string            `jubako:"b"`              // no json tag
+		C       string            `json:",omitempty"`       // empty json key falls back to field name
+		Skip    string            `json:"skip" jubako:"-"`  // explicitly skipped
+		Ignore  string            `json:"-" jubako:"/gone"` // ignored by json tag
+		In      inner             `json:"in"`
+		Ptr     *inner            `json:"ptr"`
+		PtrList []*inner          `json:"ptr_list"`
+		List    []inner           `json:"list"`
+		Dict    map[string]inner  `json:"dict"`
+		PtrDict map[string]*inner `json:"ptr_dict"`
+		private string
+	}
+
+	if got := buildMappingTable(reflect.TypeOf(0)); got != nil {
+		t.Fatalf("buildMappingTable(non-struct) = %v, want nil", got)
+	}
+
+	table := buildMappingTable(reflect.TypeOf(cfg{}))
+	if table == nil || table.IsEmpty() {
+		t.Fatal("buildMappingTable() returned empty table")
+	}
+	if s := table.String(); s == "" {
+		t.Fatal("MappingTable.String() returned empty")
+	}
+
+	table = buildMappingTable(reflect.TypeOf(&cfg{}))
+	if table == nil || table.IsEmpty() {
+		t.Fatal("buildMappingTable(ptr) returned empty table")
+	}
+}
+
+func TestApplyMappingsWithRoot_SliceAndMapFallbacks(t *testing.T) {
+	type inner struct {
+		Value string `json:"value" jubako:"./x"`
+	}
+	type cfg struct {
+		List []inner          `json:"list"`
+		Dict map[string]inner `json:"dict"`
+	}
+
+	table := buildMappingTable(reflect.TypeOf(cfg{}))
+	src := map[string]any{
+		"list": []any{
+			"not-a-map",
+			map[string]any{"x": "ok"},
+		},
+		"dict": map[string]any{
+			"a": map[string]any{"x": "ok"},
+			"b": "not-a-map",
+		},
+	}
+
+	out := applyMappingsWithRoot(src, src, table)
+	list := out["list"].([]any)
+	if list[0] != "not-a-map" {
+		t.Fatalf("list[0] = %#v", list[0])
+	}
+	if got := list[1].(map[string]any)["value"]; got != "ok" {
+		t.Fatalf("list[1].value = %#v, want %q", got, "ok")
+	}
+	dict := out["dict"].(map[string]any)
+	if got := dict["a"].(map[string]any)["value"]; got != "ok" {
+		t.Fatalf("dict[a].value = %#v, want %q", got, "ok")
+	}
+	if dict["b"] != "not-a-map" {
+		t.Fatalf("dict[b] = %#v", dict["b"])
+	}
+}
+
+func TestStore_Load_SkipsNilLayerData(t *testing.T) {
+	ctx := context.Background()
+	store := New[testConfig]()
+	if err := store.Add(&nilDataLayer{name: "nil"}); err != nil {
+		t.Fatalf("Add(nil) error = %v", err)
+	}
+	if err := store.Add(mapdata.New("user", map[string]any{"host": "h", "port": 1})); err != nil {
+		t.Fatalf("Add(user) error = %v", err)
+	}
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := store.Get().Host; got != "h" {
+		t.Fatalf("Host = %q, want %q", got, "h")
+	}
+}
+
+func TestResolveContainerLocked_EdgeCases(t *testing.T) {
+	store := New[map[string]any]()
+
+	// No entries.
+	if got := store.resolveContainerLocked("/missing", &layerEntry{}); got.Exists {
+		t.Fatalf("resolveContainerLocked(/missing) = %#v, want empty", got)
+	}
+
+	// Entries exist but none contribute a value.
+	nilEntry := &layerEntry{data: nil}
+	missingEntry := &layerEntry{data: map[string]any{"a": 1}}
+	store.origins.setContainer("/c", nilEntry)
+	store.origins.setContainer("/c", missingEntry)
+	if got := store.resolveContainerLocked("/c", missingEntry); got.Exists {
+		t.Fatalf("resolveContainerLocked(/c) = %#v, want empty", got)
+	}
+}
+
+func TestStore_GetAllAt_SkipsEmptyResolvedValues(t *testing.T) {
+	store := New[map[string]any]()
+	nilEntry := &layerEntry{data: nil}
+	store.origins.setLeaf("/a", nilEntry)
+	if got := store.GetAllAt("/a"); got == nil || got.Len() != 0 {
+		t.Fatalf("GetAllAt(/a) = %#v, want empty slice", got)
 	}
 }

@@ -10,6 +10,38 @@ import (
 	"github.com/yacchi/jubako/source"
 )
 
+type lockFile interface {
+	Stat() (os.FileInfo, error)
+	ReadAt(p []byte, off int64) (n int, err error)
+	Close() error
+	Fd() uintptr
+}
+
+type tempFile interface {
+	Write(p []byte) (n int, err error)
+	Sync() error
+	Close() error
+	Name() string
+}
+
+var (
+	userHomeDir  = os.UserHomeDir
+	osReadFile   = os.ReadFile
+	osStat       = os.Stat
+	osMkdirAll   = os.MkdirAll
+	osChmod      = os.Chmod
+	osRename     = os.Rename
+	osRemove     = os.Remove
+	fileLockFunc = fileLock
+
+	openFile = func(name string, flag int, perm os.FileMode) (lockFile, error) {
+		return os.OpenFile(name, flag, perm)
+	}
+	createTemp = func(dir, pattern string) (tempFile, error) {
+		return os.CreateTemp(dir, pattern)
+	}
+)
+
 // fileLock attempts to acquire an exclusive lock on the given file descriptor.
 // Returns a function to release the lock. If locking is not supported by the
 // filesystem, both the error and unlock function will be nil - the operation
@@ -113,7 +145,7 @@ func (s *Source) Load(ctx context.Context) ([]byte, error) {
 	}
 
 	// Read file
-	data, err := os.ReadFile(resolvedPath)
+	data, err := osReadFile(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file %q: %w", originalPath, err)
 	}
@@ -152,13 +184,13 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, s.dirMode); err != nil {
+	if err := osMkdirAll(dir, s.dirMode); err != nil {
 		return fmt.Errorf("failed to create directory %q: %w", dir, err)
 	}
 
 	// Open or create file for locking
 	// We use O_RDWR|O_CREATE to handle both existing and new files
-	lockFile, err := os.OpenFile(targetPath, os.O_RDWR|os.O_CREATE, s.fileMode)
+	lockFile, err := openFile(targetPath, os.O_RDWR|os.O_CREATE, s.fileMode)
 	if err != nil {
 		return fmt.Errorf("failed to open file %q for locking: %w", targetPath, err)
 	}
@@ -166,7 +198,7 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 
 	// Acquire exclusive lock
 	// If locking is not supported, fileLock returns (func(){}, nil) and we proceed
-	unlock, err := fileLock(int(lockFile.Fd()))
+	unlock, err := fileLockFunc(int(lockFile.Fd()))
 	if err != nil {
 		return fmt.Errorf("failed to acquire lock on %q: %w", targetPath, err)
 	}
@@ -192,7 +224,7 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	}
 
 	// Atomic write via temp file + rename
-	tmpFile, err := os.CreateTemp(dir, ".jubako-*.tmp")
+	tmpFile, err := createTemp(dir, ".jubako-*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
@@ -202,7 +234,7 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	success := false
 	defer func() {
 		if !success {
-			os.Remove(tmpPath)
+			osRemove(tmpPath)
 		}
 	}()
 
@@ -223,12 +255,12 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	}
 
 	// Set permissions
-	if err := os.Chmod(tmpPath, s.fileMode); err != nil {
+	if err := osChmod(tmpPath, s.fileMode); err != nil {
 		return fmt.Errorf("failed to set file permissions: %w", err)
 	}
 
 	// Atomic rename (lock is still held, ensuring exclusive access)
-	if err := os.Rename(tmpPath, targetPath); err != nil {
+	if err := osRename(tmpPath, targetPath); err != nil {
 		return fmt.Errorf("failed to rename temporary file to %q: %w", targetPath, err)
 	}
 
@@ -270,7 +302,7 @@ func (s *Source) resolvePath() (expanded string, original string, err error) {
 		if err != nil {
 			continue
 		}
-		if _, statErr := os.Stat(expanded); statErr == nil {
+		if _, statErr := osStat(expanded); statErr == nil {
 			return expanded, p, nil
 		}
 	}
@@ -295,7 +327,7 @@ func expandTilde(path string) (string, error) {
 		return path, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := userHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to expand home directory: %w", err)
 	}

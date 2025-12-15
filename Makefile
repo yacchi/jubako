@@ -1,5 +1,8 @@
 .PHONY: build test lint clean fmt vet examples setup check-release check-ci tidy
 
+GOCACHE ?= $(CURDIR)/.gocache
+export GOCACHE
+
 # Find all modules with go.mod (excluding .gopath and vendor)
 ALL_MODULES := $(shell find . -name "go.mod" -not -path "./.gopath/*" -not -path "./vendor/*" -exec dirname {} \; | sort)
 

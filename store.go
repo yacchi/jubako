@@ -471,7 +471,7 @@ func (s *Store[T]) Reload(ctx context.Context) error {
 	// Reapply saved changesets
 	for _, entry := range s.layers {
 		changeset, exists := savedChangesets[entry.layer.Name()]
-		if !exists || len(changeset) == 0 {
+		if !exists {
 			entry.changeset = nil
 			entry.dirty = false
 			continue

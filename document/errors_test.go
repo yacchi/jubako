@@ -157,3 +157,28 @@ func TestErrorUnwrapping(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsupportedStructureError(t *testing.T) {
+	t.Run("Error without path", func(t *testing.T) {
+		err := &UnsupportedStructureError{Reason: "arrays"}
+		if got, want := err.Error(), "unsupported structure: arrays"; got != want {
+			t.Fatalf("Error() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("Error with path", func(t *testing.T) {
+		err := &UnsupportedStructureError{Path: "/items/0", Reason: "arrays"}
+		if got, want := err.Error(), `unsupported structure at "/items/0": arrays`; got != want {
+			t.Fatalf("Error() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("constructors", func(t *testing.T) {
+		if got := Unsupported("x"); got.Path != "" || got.Reason != "x" {
+			t.Fatalf("Unsupported() = %+v", got)
+		}
+		if got := UnsupportedAt("/p", "y"); got.Path != "/p" || got.Reason != "y" {
+			t.Fatalf("UnsupportedAt() = %+v", got)
+		}
+	})
+}

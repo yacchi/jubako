@@ -191,6 +191,7 @@ func TestWithEnvironFunc(t *testing.T) {
 	t.Run("custom environ function", func(t *testing.T) {
 		l := New("env", "APP_", WithEnvironFunc(func() []string {
 			return []string{
+				"INVALID_ENV_WITHOUT_EQUALS",
 				"APP_SERVER_HOST=localhost",
 				"APP_SERVER_PORT=8080",
 				"OTHER_VAR=ignored",
