@@ -75,8 +75,9 @@ func WithPriority(p layer.Priority) AddOption {
 	}
 }
 
-// WithReadOnly marks the layer as read-only, preventing modifications via SetTo.
-// This is useful for system-wide configuration files that should not be modified,
+// WithReadOnly marks the layer as read-only, preventing modifications via SetTo
+// and preventing writes via Save/SaveLayer.
+// This is useful for system-wide configuration files that should never be modified,
 // even if the underlying source supports saving.
 func WithReadOnly() AddOption {
 	return func(o *addOptions) {
@@ -613,8 +614,8 @@ func (s *Store[T]) Save(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// SaveLayer persists a specific layer's document to its source.
-// Returns an error if the layer doesn't support saving (doesn't implement WritableLayer).
+// SaveLayer persists a specific layer's pending changes to its source.
+// If the layer has no pending changes, SaveLayer is a no-op.
 // After successful save, the dirty flag is cleared for the layer.
 //
 // Example:
@@ -641,12 +642,23 @@ func (s *Store[T]) SaveLayer(ctx context.Context, layerName layer.Name) error {
 // saveLayerLocked saves a single layer entry.
 // Caller must hold the lock.
 func (s *Store[T]) saveLayerLocked(ctx context.Context, entry *layerEntry) error {
-	if !entry.layer.CanSave() {
-		return fmt.Errorf("layer %q does not support saving", entry.layer.Name())
-	}
-
 	if entry.data == nil {
 		return fmt.Errorf("layer %q has not been loaded", entry.layer.Name())
+	}
+
+	// Avoid rewriting unchanged documents.
+	// This is important for comment-preserving formats where "save without changes"
+	// could still re-serialize and lose formatting/comments depending on the Document.
+	if !entry.dirty || entry.changeset.IsEmpty() {
+		return nil
+	}
+
+	if entry.readOnly {
+		return fmt.Errorf("layer %q is marked as read-only", entry.layer.Name())
+	}
+
+	if !entry.layer.CanSave() {
+		return fmt.Errorf("layer %q does not support saving", entry.layer.Name())
 	}
 
 	if err := entry.layer.Save(ctx, entry.changeset); err != nil {

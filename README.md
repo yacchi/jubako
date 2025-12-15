@@ -590,6 +590,9 @@ func main() {
 }
 ```
 
+Note: `Save`/`SaveLayer` only writes layers with pending changes (set via `SetTo`).
+This avoids rewriting unchanged documents, which could otherwise re-serialize and lose formatting/comments depending on the format.
+
 ### Origin Tracking
 
 Track which layer each configuration value comes from.

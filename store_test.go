@@ -1070,8 +1070,45 @@ func TestStore_SaveLayer_ErrorPaths(t *testing.T) {
 		if err := store.Load(ctx); err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
+		// SaveLayer is a no-op when there are no pending changes.
+		if err := store.SaveLayer(ctx, "nosave"); err != nil {
+			t.Fatalf("SaveLayer() error = %v", err)
+		}
+
+		// Force the layer into a dirty state to validate the error path.
+		store.mu.Lock()
+		entry := store.findLayerLocked("nosave")
+		entry.dirty = true
+		entry.changeset = document.JSONPatchSet{
+			{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
+		}
+		store.mu.Unlock()
+
 		if err := store.SaveLayer(ctx, "nosave"); err == nil {
 			t.Fatal("SaveLayer() expected error, got nil")
+		}
+	})
+
+	t.Run("read-only layer cannot be saved", func(t *testing.T) {
+		store := New[testConfig]()
+		if err := store.Add(mapdata.New("ro", map[string]any{"host": "h"}), WithReadOnly()); err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// Force the layer into a dirty state to validate the error path.
+		store.mu.Lock()
+		entry := store.findLayerLocked("ro")
+		entry.dirty = true
+		entry.changeset = document.JSONPatchSet{
+			{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
+		}
+		store.mu.Unlock()
+
+		if err := store.SaveLayer(ctx, "ro"); err == nil {
+			t.Fatal("SaveLayer() on read-only layer expected error, got nil")
 		}
 	})
 }
