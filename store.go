@@ -365,10 +365,11 @@ func (s *Store[T]) Get() T {
 //	defer unsubscribe()
 func (s *Store[T]) Subscribe(fn func(T)) func() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	id := s.nextSubID
 	s.nextSubID++
 	s.subscribers = append(s.subscribers, subscriber[T]{id: id, fn: fn})
-	s.mu.Unlock()
 
 	// Return unsubscribe function
 	return func() {
@@ -407,15 +408,29 @@ func (s *Store[T]) notifySubscribers() {
 //	  log.Fatal(err)
 //	}
 func (s *Store[T]) Load(ctx context.Context) error {
+	current, subscribers, err := s.loadLocked(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sub := range subscribers {
+		sub.fn(current)
+	}
+	return nil
+}
+
+// loadLocked performs the layer loading and materialization under lock.
+// Returns the current configuration and subscribers snapshot for notification outside the lock.
+func (s *Store[T]) loadLocked(ctx context.Context) (T, []subscriber[T], error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Load each layer's data
 	for _, entry := range s.layers {
 		// Load data through the layer interface
 		data, err := entry.layer.Load(ctx)
 		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
+			var zero T
+			return zero, nil, fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
 		}
 		// Store the loaded data in the entry
 		entry.data = data
@@ -426,15 +441,7 @@ func (s *Store[T]) Load(ctx context.Context) error {
 	}
 
 	// Materialize the merged configuration
-	current, subscribers, err := s.materializeLocked()
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	for _, sub := range subscribers {
-		sub.fn(current)
-	}
-	return nil
+	return s.materializeLocked()
 }
 
 // Reload reloads all layers and re-materializes the configuration.
@@ -448,7 +455,22 @@ func (s *Store[T]) Load(ctx context.Context) error {
 //	  log.Printf("Failed to reload config: %v", err)
 //	}
 func (s *Store[T]) Reload(ctx context.Context) error {
+	current, subscribers, err := s.reloadLocked(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sub := range subscribers {
+		sub.fn(current)
+	}
+	return nil
+}
+
+// reloadLocked performs the layer reloading and materialization under lock.
+// Unlike loadLocked, it preserves and reapplies uncommitted changesets.
+// Returns the current configuration and subscribers snapshot for notification outside the lock.
+func (s *Store[T]) reloadLocked(ctx context.Context) (T, []subscriber[T], error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Save existing changesets before reloading
 	savedChangesets := make(map[layer.Name][]document.JSONPatch)
@@ -462,8 +484,8 @@ func (s *Store[T]) Reload(ctx context.Context) error {
 	for _, entry := range s.layers {
 		data, err := entry.layer.Load(ctx)
 		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
+			var zero T
+			return zero, nil, fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
 		}
 		// Store the loaded data in the entry
 		entry.data = data
@@ -494,15 +516,7 @@ func (s *Store[T]) Reload(ctx context.Context) error {
 	}
 
 	// Materialize the merged configuration
-	current, subscribers, err := s.materializeLocked()
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	for _, sub := range subscribers {
-		sub.fn(current)
-	}
-	return nil
+	return s.materializeLocked()
 }
 
 // SetTo sets a value in a specific layer at the given JSONPointer path.
@@ -519,34 +533,47 @@ func (s *Store[T]) Reload(ctx context.Context) error {
 //	// Save the change to disk
 //	err = store.SaveLayer(ctx, "user")
 func (s *Store[T]) SetTo(layerName layer.Name, path string, value any) error {
+	current, subscribers, err := s.setToLocked(layerName, path, value)
+	if err != nil {
+		return err
+	}
+	for _, sub := range subscribers {
+		sub.fn(current)
+	}
+	return nil
+}
+
+// setToLocked performs the value setting and materialization under lock.
+// Returns the current configuration and subscribers snapshot for notification outside the lock.
+func (s *Store[T]) setToLocked(layerName layer.Name, path string, value any) (T, []subscriber[T], error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	entry := s.findLayerLocked(layerName)
 	if entry == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("layer %q not found", layerName)
+		var zero T
+		return zero, nil, fmt.Errorf("layer %q not found", layerName)
 	}
 
 	if !entry.Writable() {
+		var zero T
 		if entry.readOnly {
-			s.mu.Unlock()
-			return fmt.Errorf("layer %q is marked as read-only", layerName)
+			return zero, nil, fmt.Errorf("layer %q is marked as read-only", layerName)
 		}
-		s.mu.Unlock()
-		return fmt.Errorf("layer %q does not support saving (source is not writable)", layerName)
+		return zero, nil, fmt.Errorf("layer %q does not support saving (source is not writable)", layerName)
 	}
 
 	if entry.data == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("layer %q has not been loaded", layerName)
+		var zero T
+		return zero, nil, fmt.Errorf("layer %q has not been loaded", layerName)
 	}
 
 	// Set the value in the data map using jsonptr.SetPath
 	// SetResult tells us whether this was a create (add) or update (replace) operation
 	result := jsonptr.SetPath(entry.data, path, value)
 	if !result.Success {
-		s.mu.Unlock()
-		return fmt.Errorf("failed to set value at path %q", path)
+		var zero T
+		return zero, nil, fmt.Errorf("failed to set value at path %q", path)
 	}
 
 	// Determine the patch operation based on SetResult
@@ -568,15 +595,7 @@ func (s *Store[T]) SetTo(layerName layer.Name, path string, value any) error {
 	entry.dirty = true
 
 	// Re-materialize to update the resolved config
-	current, subscribers, err := s.materializeLocked()
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	for _, sub := range subscribers {
-		sub.fn(current)
-	}
-	return nil
+	return s.materializeLocked()
 }
 
 // Save persists all modified (dirty) layers to their sources.

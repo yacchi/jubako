@@ -65,10 +65,11 @@ func (c *Cell[T]) Set(v T) {
 //	defer unsubscribe()
 func (c *Cell[T]) Subscribe(fn func(T)) func() {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	id := c.nextID
 	c.nextID++
 	c.listeners = append(c.listeners, listener[T]{id: id, fn: fn})
-	c.mu.Unlock()
 
 	// Return unsubscribe function
 	return func() {

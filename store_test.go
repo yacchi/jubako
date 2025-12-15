@@ -1076,13 +1076,15 @@ func TestStore_SaveLayer_ErrorPaths(t *testing.T) {
 		}
 
 		// Force the layer into a dirty state to validate the error path.
-		store.mu.Lock()
-		entry := store.findLayerLocked("nosave")
-		entry.dirty = true
-		entry.changeset = document.JSONPatchSet{
-			{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
-		}
-		store.mu.Unlock()
+		func() {
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			entry := store.findLayerLocked("nosave")
+			entry.dirty = true
+			entry.changeset = document.JSONPatchSet{
+				{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
+			}
+		}()
 
 		if err := store.SaveLayer(ctx, "nosave"); err == nil {
 			t.Fatal("SaveLayer() expected error, got nil")
@@ -1099,13 +1101,15 @@ func TestStore_SaveLayer_ErrorPaths(t *testing.T) {
 		}
 
 		// Force the layer into a dirty state to validate the error path.
-		store.mu.Lock()
-		entry := store.findLayerLocked("ro")
-		entry.dirty = true
-		entry.changeset = document.JSONPatchSet{
-			{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
-		}
-		store.mu.Unlock()
+		func() {
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			entry := store.findLayerLocked("ro")
+			entry.dirty = true
+			entry.changeset = document.JSONPatchSet{
+				{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
+			}
+		}()
 
 		if err := store.SaveLayer(ctx, "ro"); err == nil {
 			t.Fatal("SaveLayer() on read-only layer expected error, got nil")
@@ -1150,13 +1154,15 @@ func TestStore_Reload_ReappliesRemovePatch(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	store.mu.Lock()
-	entry := store.findLayerLocked("user")
-	entry.changeset = []document.JSONPatch{
-		{Op: document.PatchOpRemove, Path: "/host"},
-	}
-	entry.dirty = true
-	store.mu.Unlock()
+	func() {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		entry := store.findLayerLocked("user")
+		entry.changeset = []document.JSONPatch{
+			{Op: document.PatchOpRemove, Path: "/host"},
+		}
+		entry.dirty = true
+	}()
 
 	if err := store.Reload(ctx); err != nil {
 		t.Fatalf("Reload() error = %v", err)
@@ -1220,9 +1226,11 @@ func TestStore_Reload_MaterializeError(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	store.mu.Lock()
-	store.decoder = func(map[string]any, any) error { return errors.New("decode error") }
-	store.mu.Unlock()
+	func() {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		store.decoder = func(map[string]any, any) error { return errors.New("decode error") }
+	}()
 
 	if err := store.Reload(ctx); err == nil {
 		t.Fatal("Reload() expected error, got nil")
@@ -1340,9 +1348,11 @@ func TestStore_SetTo_MaterializeError(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	store.mu.Lock()
-	store.decoder = func(map[string]any, any) error { return errors.New("decode error") }
-	store.mu.Unlock()
+	func() {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		store.decoder = func(map[string]any, any) error { return errors.New("decode error") }
+	}()
 
 	if err := store.SetTo("user", "/host", "x"); err == nil {
 		t.Fatal("SetTo() expected error, got nil")
