@@ -116,8 +116,11 @@ func SetPath(data map[string]any, path string, value any) SetResult {
 }
 
 // SetByKeys sets a value in a nested map using pre-parsed keys.
-// Creates intermediate maps as needed. If an intermediate node is not a map,
-// it will be replaced with a new map.
+// Creates intermediate maps as needed. Supports array index operations.
+// For arrays, you can:
+//   - Update an existing element: index < len(array)
+//   - Append a new element: index == len(array)
+//
 // This is useful when you already have the keys from Parse().
 // Returns SetResult with details about the operation.
 func SetByKeys(data map[string]any, keys []string, value any) SetResult {
@@ -125,36 +128,191 @@ func SetByKeys(data map[string]any, keys []string, value any) SetResult {
 		return SetResult{Success: false}
 	}
 
-	current := data
-	for i := 0; i < len(keys)-1; i++ {
-		key := keys[i]
-		next, ok := current[key]
-		if !ok {
-			newMap := make(map[string]any)
-			current[key] = newMap
-			current = newMap
-		} else if m, ok := next.(map[string]any); ok {
-			current = m
-		} else {
-			// Overwrite non-map intermediate
-			newMap := make(map[string]any)
-			current[key] = newMap
-			current = newMap
+	// Handle single key case (direct map access)
+	if len(keys) == 1 {
+		finalKey := keys[0]
+		_, exists := data[finalKey]
+		data[finalKey] = value
+		return SetResult{
+			Success:  true,
+			Created:  !exists,
+			Replaced: exists,
 		}
 	}
 
-	// Check if key exists before setting
+	// Navigate to the parent of the final key
+	parent, parentKey, isArrayParent, ok := navigateToParent(data, keys)
+	if !ok {
+		return SetResult{Success: false}
+	}
+
 	finalKey := keys[len(keys)-1]
-	_, exists := current[finalKey]
 
-	// Set the final key
-	current[finalKey] = value
+	if isArrayParent {
+		// Parent is an array
+		arr := parent.([]any)
+		idx, err := strconv.Atoi(finalKey)
+		if err != nil {
+			return SetResult{Success: false}
+		}
+		if idx < 0 || idx > len(arr) {
+			return SetResult{Success: false}
+		}
 
+		if idx == len(arr) {
+			// Append
+			arr = append(arr, value)
+			// Update the parent container with the new array
+			if err := updateParentArray(data, keys[:len(keys)-1], arr); err != nil {
+				return SetResult{Success: false}
+			}
+			return SetResult{Success: true, Created: true}
+		}
+
+		// Update existing element
+		arr[idx] = value
+		return SetResult{Success: true, Replaced: true}
+	}
+
+	// Parent is a map
+	m := parent.(map[string]any)
+	_, exists := m[parentKey]
+
+	// Check if final key is an array index for a non-existent array
+	if idx, err := strconv.Atoi(finalKey); err == nil {
+		existing, hasKey := m[parentKey]
+		if hasKey {
+			if arr, isArr := existing.([]any); isArr {
+				if idx < 0 || idx > len(arr) {
+					return SetResult{Success: false}
+				}
+				if idx == len(arr) {
+					m[parentKey] = append(arr, value)
+					return SetResult{Success: true, Created: true}
+				}
+				arr[idx] = value
+				return SetResult{Success: true, Replaced: true}
+			}
+		}
+	}
+
+	_, finalExists := m[finalKey]
+	m[finalKey] = value
 	return SetResult{
 		Success:  true,
-		Created:  !exists,
-		Replaced: exists,
+		Created:  !finalExists && !exists,
+		Replaced: finalExists || exists,
 	}
+}
+
+// navigateToParent navigates to the parent container of the final key.
+// Returns (parent container, parent key in grandparent, isArray, ok).
+func navigateToParent(data map[string]any, keys []string) (any, string, bool, bool) {
+	if len(keys) < 2 {
+		return data, "", false, true
+	}
+
+	var current any = data
+	for i := 0; i < len(keys)-1; i++ {
+		key := keys[i]
+
+		switch c := current.(type) {
+		case map[string]any:
+			next, ok := c[key]
+			if !ok {
+				// Need to create intermediate
+				// Check if next key is numeric (create array) or not (create map)
+				if i+1 < len(keys) {
+					if _, err := strconv.Atoi(keys[i+1]); err == nil {
+						// Next key is numeric, create array
+						newArr := make([]any, 0)
+						c[key] = newArr
+						current = newArr
+						continue
+					}
+				}
+				newMap := make(map[string]any)
+				c[key] = newMap
+				current = newMap
+			} else if m, ok := next.(map[string]any); ok {
+				current = m
+			} else if arr, ok := next.([]any); ok {
+				current = arr
+			} else {
+				// Overwrite non-container intermediate with map
+				newMap := make(map[string]any)
+				c[key] = newMap
+				current = newMap
+			}
+		case []any:
+			idx, err := strconv.Atoi(key)
+			if err != nil || idx < 0 || idx >= len(c) {
+				return nil, "", false, false
+			}
+			elem := c[idx]
+			if m, ok := elem.(map[string]any); ok {
+				current = m
+			} else if arr, ok := elem.([]any); ok {
+				current = arr
+			} else {
+				// Need to replace with container
+				// Check if next key is numeric
+				if i+1 < len(keys) {
+					if _, err := strconv.Atoi(keys[i+1]); err == nil {
+						newArr := make([]any, 0)
+						c[idx] = newArr
+						current = newArr
+						continue
+					}
+				}
+				newMap := make(map[string]any)
+				c[idx] = newMap
+				current = newMap
+			}
+		default:
+			return nil, "", false, false
+		}
+	}
+
+	// Determine if parent is array
+	if _, isArr := current.([]any); isArr {
+		return current, keys[len(keys)-2], true, true
+	}
+	return current, keys[len(keys)-2], false, true
+}
+
+// updateParentArray updates an array at the given path in the data structure.
+func updateParentArray(data map[string]any, keys []string, newArr []any) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	if len(keys) == 1 {
+		data[keys[0]] = newArr
+		return nil
+	}
+
+	var current any = data
+	for i := 0; i < len(keys)-1; i++ {
+		key := keys[i]
+		switch c := current.(type) {
+		case map[string]any:
+			current = c[key]
+		case []any:
+			idx, _ := strconv.Atoi(key)
+			current = c[idx]
+		}
+	}
+
+	lastKey := keys[len(keys)-1]
+	switch c := current.(type) {
+	case map[string]any:
+		c[lastKey] = newArr
+	case []any:
+		idx, _ := strconv.Atoi(lastKey)
+		c[idx] = newArr
+	}
+	return nil
 }
 
 // DeletePath removes a value at the given JSON Pointer path from a nested map.
@@ -184,6 +342,8 @@ func DeletePath(data map[string]any, path string) bool {
 }
 
 // DeleteByKeys removes a value from a nested map using pre-parsed keys.
+// Supports array index operations - when deleting from an array,
+// the element is removed and subsequent elements shift down.
 // Returns true if the value was deleted, false if the path was not found.
 // This is useful when you already have the keys from Parse().
 func DeleteByKeys(data map[string]any, keys []string) bool {
@@ -191,26 +351,120 @@ func DeleteByKeys(data map[string]any, keys []string) bool {
 		return false
 	}
 
-	current := data
-	for i := 0; i < len(keys)-1; i++ {
-		key := keys[i]
-		next, ok := current[key]
-		if !ok {
+	// Handle single key case
+	if len(keys) == 1 {
+		finalKey := keys[0]
+		if _, exists := data[finalKey]; !exists {
 			return false
 		}
-		m, ok := next.(map[string]any)
-		if !ok {
-			return false
-		}
-		current = m
+		delete(data, finalKey)
+		return true
 	}
 
-	// Check if key exists and delete
-	finalKey := keys[len(keys)-1]
-	if _, exists := current[finalKey]; !exists {
+	// Navigate to the parent container
+	parent, ok := navigateToParentForDelete(data, keys)
+	if !ok || parent == nil {
 		return false
 	}
 
-	delete(current, finalKey)
-	return true
+	finalKey := keys[len(keys)-1]
+
+	switch p := parent.(type) {
+	case map[string]any:
+		if _, exists := p[finalKey]; !exists {
+			return false
+		}
+		delete(p, finalKey)
+		return true
+	case []any:
+		idx, err := strconv.Atoi(finalKey)
+		if err != nil || idx < 0 || idx >= len(p) {
+			return false
+		}
+		// Remove the element from the array
+		newArr := append(p[:idx], p[idx+1:]...)
+		// Update the parent container with the new array
+		updateParentArrayForDelete(data, keys[:len(keys)-1], newArr)
+		return true
+	}
+
+	return false
+}
+
+// navigateToParentForDelete navigates to the parent container.
+// Returns (parent container, ok).
+func navigateToParentForDelete(data map[string]any, keys []string) (any, bool) {
+	if len(keys) < 2 {
+		return data, true
+	}
+
+	var current any = data
+	for i := 0; i < len(keys)-1; i++ {
+		key := keys[i]
+
+		switch c := current.(type) {
+		case map[string]any:
+			next, ok := c[key]
+			if !ok {
+				return nil, false
+			}
+			if m, ok := next.(map[string]any); ok {
+				current = m
+			} else if arr, ok := next.([]any); ok {
+				current = arr
+			} else {
+				return nil, false
+			}
+		case []any:
+			idx, err := strconv.Atoi(key)
+			if err != nil || idx < 0 || idx >= len(c) {
+				return nil, false
+			}
+			elem := c[idx]
+			if m, ok := elem.(map[string]any); ok {
+				current = m
+			} else if arr, ok := elem.([]any); ok {
+				current = arr
+			} else {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+
+	return current, true
+}
+
+// updateParentArrayForDelete updates an array at the given path after deletion.
+func updateParentArrayForDelete(data map[string]any, keys []string, newArr []any) {
+	if len(keys) == 0 {
+		return
+	}
+
+	if len(keys) == 1 {
+		data[keys[0]] = newArr
+		return
+	}
+
+	var current any = data
+	for i := 0; i < len(keys)-1; i++ {
+		key := keys[i]
+		switch c := current.(type) {
+		case map[string]any:
+			current = c[key]
+		case []any:
+			idx, _ := strconv.Atoi(key)
+			current = c[idx]
+		}
+	}
+
+	lastKey := keys[len(keys)-1]
+	switch c := current.(type) {
+	case map[string]any:
+		c[lastKey] = newArr
+	case []any:
+		idx, _ := strconv.Atoi(lastKey)
+		c[idx] = newArr
+	}
 }

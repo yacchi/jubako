@@ -94,6 +94,15 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 			v, _ = hujson.Parse([]byte("{}"))
 			root = v
 		} else {
+			// Check if the parsed value is null - if so, treat as empty object
+			// Other non-object values (scalars, arrays) are preserved as-is
+			testCopy := v.Clone()
+			testCopy.Standardize()
+			packed := testCopy.Pack()
+			if bytes.Equal(bytes.TrimSpace(packed), []byte("null")) {
+				// Input is null - create new empty object
+				v, _ = hujson.Parse([]byte("{}"))
+			}
 			root = v
 		}
 	} else {
@@ -104,6 +113,15 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 
 	// Apply each patch operation using hujson.Patch
 	for _, patch := range changeset {
+		// Skip invalid paths: must start with "/" (except empty string for root)
+		if patch.Path != "" && !strings.HasPrefix(patch.Path, "/") {
+			continue
+		}
+		// Skip root path operations as they would replace the entire document
+		if patch.Path == "" {
+			continue
+		}
+
 		var op string
 		switch patch.Op {
 		case document.PatchOpAdd:
@@ -173,7 +191,7 @@ func ensureIntermediateObjects(root *hujson.Value, path string) error {
 	rootBytes := root.Pack()
 	tempRoot, err := hujson.Parse(rootBytes)
 	if err != nil {
-		return nil
+		return err
 	}
 	tempRoot.Standardize()
 	var currentData map[string]any
@@ -197,7 +215,7 @@ func ensureIntermediateObjects(root *hujson.Value, path string) error {
 				continue
 			}
 			// Path exists but is not an object - can't create intermediate paths
-			return nil
+			return fmt.Errorf("path %q exists but is not an object", currentPath)
 		}
 
 		// Path doesn't exist - mark it for creation
@@ -213,12 +231,9 @@ func ensureIntermediateObjects(root *hujson.Value, path string) error {
 			"path":  p,
 			"value": map[string]any{},
 		}}
-		patchBytes, err := json.Marshal(patchObj)
-		if err != nil {
-			continue
-		}
+		patchBytes, _ := json.Marshal(patchObj)
 		if err := root.Patch(patchBytes); err != nil {
-			return nil
+			return err
 		}
 	}
 

@@ -99,17 +99,6 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 
 	// Get the root mapping node
 	rootMapping := getRootMapping(root)
-	if rootMapping == nil {
-		// Fallback: parse data and marshal
-		var m map[string]any
-		if len(bytes.TrimSpace(data)) > 0 {
-			yaml.Unmarshal(data, &m)
-		}
-		if m == nil {
-			m = map[string]any{}
-		}
-		return yaml.Marshal(m)
-	}
 
 	// Apply each patch operation
 	for _, patch := range changeset {
@@ -143,8 +132,16 @@ func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
 // getRootMapping returns the root mapping node.
 // YAML documents have a DocumentNode wrapper around the actual content.
 func getRootMapping(root *yaml.Node) *yaml.Node {
+	if root == nil {
+		return nil
+	}
 	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
 		return root.Content[0]
+	}
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 0 {
+		m := &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = []*yaml.Node{m}
+		return m
 	}
 	return root
 }

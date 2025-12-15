@@ -23,6 +23,9 @@ type Document struct{}
 // Ensure Document implements document.Document interface.
 var _ document.Document = (*Document)(nil)
 
+var tomlMarshal = toml.Marshal
+var tomlUnmarshal = toml.Unmarshal
+
 // New returns a TOML Document.
 //
 // Example:
@@ -46,7 +49,7 @@ func (d *Document) Get(data []byte) (map[string]any, error) {
 	}
 
 	var result map[string]any
-	if err := toml.Unmarshal(data, &result); err != nil {
+	if err := tomlUnmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse TOML: %w", err)
 	}
 
@@ -65,7 +68,7 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 	// Parse data to check for nil values
 	var current map[string]any
 	if len(bytes.TrimSpace(data)) > 0 {
-		if err := toml.Unmarshal(data, &current); err != nil {
+		if err := tomlUnmarshal(data, &current); err != nil {
 			return nil, fmt.Errorf("failed to parse TOML: %w", err)
 		}
 	}
@@ -177,7 +180,7 @@ func applySetWithArray(src []byte, keys []string, value any) ([]byte, error) {
 	// Decode current data
 	var root map[string]any
 	if len(bytes.TrimSpace(src)) > 0 {
-		if err := toml.Unmarshal(src, &root); err != nil {
+		if err := tomlUnmarshal(src, &root); err != nil {
 			return nil, err
 		}
 	}
@@ -186,12 +189,10 @@ func applySetWithArray(src []byte, keys []string, value any) ([]byte, error) {
 	}
 
 	// Ensure array exists at container path
-	if _, ok := getAny(root, containerKeys); !ok {
-		setAny(root, containerKeys, []any{})
-	}
 	arrAny, ok := getAny(root, containerKeys)
 	if !ok {
-		return nil, &document.PathNotFoundError{Path: buildPointer(keys)}
+		arrAny = []any{}
+		setAny(root, containerKeys, arrAny)
 	}
 	arr, ok := arrAny.([]any)
 	if !ok {
@@ -231,10 +232,7 @@ func applySetNonIndexed(src []byte, keys []string, value any) ([]byte, error) {
 		return replaceBytes(src, kv.valueStart, kv.valueEnd, []byte(newValue)), nil
 	}
 
-	insertPos, err := idx.ensureSectionEnd(tablePath, &src)
-	if err != nil {
-		return nil, err
-	}
+	insertPos := idx.ensureSectionEnd(tablePath, &src)
 
 	line := []byte(formatKey(leafKey) + " = " + newValue + "\n")
 	return insertBytes(src, insertPos, ensureLeadingNewline(src, insertPos, line)), nil
@@ -267,7 +265,7 @@ func applyDeleteWithArray(src []byte, keys []string) ([]byte, error) {
 	// Decode current data
 	var root map[string]any
 	if len(bytes.TrimSpace(src)) > 0 {
-		if err := toml.Unmarshal(src, &root); err != nil {
+		if err := tomlUnmarshal(src, &root); err != nil {
 			return nil, err
 		}
 	}
@@ -284,10 +282,7 @@ func applyDeleteWithArray(src []byte, keys []string) ([]byte, error) {
 		return nil, &document.TypeMismatchError{Path: buildPointer(containerKeys), Expected: "array", Actual: fmt.Sprintf("%T", arrAny)}
 	}
 
-	updated, err := deleteAnyInArray(arr, relativeKeys)
-	if err != nil {
-		return nil, err
-	}
+	updated, _ := deleteAnyInArray(arr, relativeKeys)
 	setAny(root, containerKeys, updated)
 
 	return applySetNonIndexed(src, containerKeys, updated)
@@ -347,25 +342,16 @@ func buildIndex(src []byte) (*index, error) {
 		n := p.Expression()
 		switch n.Kind {
 		case unstable.Table:
-			tpath, off, err := tablePathAndLineStart(&p, n)
-			if err != nil {
-				return nil, err
-			}
+			tpath, off := tablePathAndLineStart(&p, n)
 			currentTable = tpath
 			idx.sections = append(idx.sections, sectionInfo{path: tpath, lineStart: off})
 		case unstable.ArrayTable:
 			// Array tables are not currently supported as a map-like container for JSON pointers.
-			tpath, off, err := tablePathAndLineStart(&p, n)
-			if err != nil {
-				return nil, err
-			}
+			tpath, off := tablePathAndLineStart(&p, n)
 			currentTable = tpath
 			idx.sections = append(idx.sections, sectionInfo{path: tpath, lineStart: off})
 		case unstable.KeyValue:
-			kv, fullPath, err := keyValueInfo(&p, n, currentTable, src)
-			if err != nil {
-				return nil, err
-			}
+			kv, fullPath := keyValueInfo(&p, n, currentTable, src)
 			idx.kvByPath[strings.Join(fullPath, "\x00")] = kv
 		}
 	}
@@ -388,7 +374,7 @@ func buildIndex(src []byte) (*index, error) {
 	return idx, nil
 }
 
-func (idx *index) ensureSectionEnd(tablePath []string, src *[]byte) (int, error) {
+func (idx *index) ensureSectionEnd(tablePath []string, src *[]byte) int {
 	if len(tablePath) == 0 {
 		// Insert in root section, before the first header if present.
 		firstHeader := len(*src)
@@ -397,12 +383,12 @@ func (idx *index) ensureSectionEnd(tablePath []string, src *[]byte) (int, error)
 				firstHeader = s.lineStart
 			}
 		}
-		return firstHeader, nil
+		return firstHeader
 	}
 
 	for _, s := range idx.sections {
 		if equalStringSlice(s.path, tablePath) {
-			return s.lineEnd, nil
+			return s.lineEnd
 		}
 	}
 
@@ -412,44 +398,53 @@ func (idx *index) ensureSectionEnd(tablePath []string, src *[]byte) (int, error)
 	}
 	header := "[" + formatDottedKey(tablePath) + "]\n"
 	*src = append(*src, []byte(header)...)
-	return len(*src), nil
+	return len(*src)
 }
 
-func tablePathAndLineStart(p *unstable.Parser, n *unstable.Node) ([]string, int, error) {
+func tablePathAndLineStart(p *unstable.Parser, n *unstable.Node) ([]string, int) {
 	var parts []string
 	it := n.Key()
-	var firstOff int = -1
+	firstOff := 0
+	firstKey := true
 	for it.Next() {
 		k := it.Node()
 		parts = append(parts, string(k.Data))
-		if firstOff < 0 {
+		if firstKey {
 			firstOff = int(k.Raw.Offset)
+			firstKey = false
 		}
 	}
-	if firstOff < 0 {
-		firstOff = 0
-	}
+
 	lineStart := findLineStart(p.Data(), firstOff)
-	return parts, lineStart, nil
+	return parts, lineStart
 }
 
-func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, src []byte) (kvInfo, []string, error) {
+func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, src []byte) (kvInfo, []string) {
 	val := n.Value()
-	if !val.Valid() {
-		return kvInfo{}, nil, fmt.Errorf("invalid TOML AST: KeyValue without value")
-	}
-
-	valueStart := rangeOffset(p, val)
-	lineStart := findLineStart(src, valueStart)
-	lineEnd := findLineEnd(src, valueStart)
-
 	fullPath := append([]string(nil), currentTable...)
 	it := n.Key()
+	keyOff := int(n.Raw.Offset)
+	firstKey := true
 	for it.Next() {
-		fullPath = append(fullPath, string(it.Node().Data))
+		k := it.Node()
+		fullPath = append(fullPath, string(k.Data))
+		if firstKey {
+			keyOff = int(k.Raw.Offset)
+			firstKey = false
+		}
 	}
-	if len(fullPath) == 0 {
-		return kvInfo{}, nil, fmt.Errorf("invalid TOML AST: KeyValue without key")
+
+	lineStart := findLineStart(src, keyOff)
+	lineEnd := findLineEnd(src, keyOff)
+
+	// Prefer the value node offset, but fall back to scanning the line.
+	valueStart := rangeOffset(p, val)
+	if valueStart <= lineStart || valueStart >= lineEnd {
+		eq := bytes.IndexByte(src[lineStart:lineEnd], '=')
+		valueStart = lineStart + eq + 1
+		for valueStart < lineEnd && (src[valueStart] == ' ' || src[valueStart] == '\t') {
+			valueStart++
+		}
 	}
 
 	valueEnd := lineEnd
@@ -461,7 +456,7 @@ func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, s
 		}
 	}
 
-	for valueEnd > valueStart && (src[valueEnd-1] == ' ' || src[valueEnd-1] == '\t') {
+	for valueEnd > valueStart && (src[valueEnd-1] == ' ' || src[valueEnd-1] == '\t' || src[valueEnd-1] == '\n' || src[valueEnd-1] == '\r') {
 		valueEnd--
 	}
 
@@ -470,11 +465,13 @@ func keyValueInfo(p *unstable.Parser, n *unstable.Node, currentTable []string, s
 		lineEnd:    lineEnd,
 		valueStart: valueStart,
 		valueEnd:   valueEnd,
-	}, fullPath, nil
+	}, fullPath
 }
 
 func rangeOffset(p *unstable.Parser, n *unstable.Node) int {
-	if n.Raw.Length > 0 {
+	// Prefer Raw offsets, which typically include the full token span (e.g. quotes for strings).
+	// Some nodes (e.g. empty arrays) may not carry reliable Raw spans; callers should fall back.
+	if n.Raw.Length > 0 || n.Raw.Offset > 0 {
 		return int(n.Raw.Offset)
 	}
 	if len(n.Data) > 0 {
@@ -630,7 +627,7 @@ func formatTOMLValue(v any) (string, error) {
 	if v == nil {
 		return "", document.Unsupported("TOML does not support null values")
 	}
-	b, err := toml.Marshal(map[string]any{"__jubako__": v})
+	b, err := tomlMarshal(map[string]any{"__jubako__": v})
 	if err != nil {
 		return "", fmt.Errorf("failed to encode TOML value: %w", err)
 	}
@@ -798,10 +795,7 @@ func deleteAnyInArray(arr []any, keys []string) ([]any, error) {
 		if !ok {
 			return arr, nil
 		}
-		updated, err := deleteAnyInArray(nested, rest)
-		if err != nil {
-			return nil, err
-		}
+		updated, _ := deleteAnyInArray(nested, rest)
 		arr[idx] = updated
 		return arr, nil
 	}
