@@ -474,7 +474,7 @@ func TestLayer_Compliance(t *testing.T) {
 		}))
 	}
 	jktest.NewLayerTester(t, factory,
-		jktest.SkipNullTest(),  // env vars can't represent null
-		jktest.SkipArrayTest(), // env vars can't represent arrays
+		jktest.SkipNullTest("environment variables cannot represent null values"),
+		jktest.SkipArrayTest("environment variables cannot represent arrays"),
 	).TestAll()
 }

@@ -40,6 +40,35 @@ import (
 	"github.com/yacchi/jubako/source"
 )
 
+type testT interface {
+	Helper()
+	Fatalf(format string, args ...any)
+	Errorf(format string, args ...any)
+	Skip(args ...any)
+	Skipf(format string, args ...any)
+}
+
+func require(t testT, cond bool, format string, args ...any) {
+	t.Helper()
+	if !cond {
+		t.Fatalf(format, args...)
+	}
+}
+
+func requireNoError(t testT, err error, format string, args ...any) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(format, args...)
+	}
+}
+
+func check(t testT, cond bool, format string, args ...any) {
+	t.Helper()
+	if !cond {
+		t.Errorf(format, args...)
+	}
+}
+
 // LayerFactory creates a Layer initialized with the given test data.
 // The factory is called for each test case to ensure test isolation.
 type LayerFactory func(data map[string]any) layer.Layer
@@ -48,27 +77,39 @@ type LayerFactory func(data map[string]any) layer.Layer
 type LayerTesterOption func(*LayerTester)
 
 // SkipNullTest skips the null value test.
-// Use this for layers that don't support null values (e.g., env layer).
-func SkipNullTest() LayerTesterOption {
+// Use this for layers that don't support null values (e.g., TOML format).
+// The reason parameter is required to document why the test is skipped.
+func SkipNullTest(reason string) LayerTesterOption {
 	return func(lt *LayerTester) {
-		lt.skipNull = true
+		lt.skipNullReason = reason
 	}
 }
 
-// SkipArrayTest skips the array test.
+// SkipArrayTest skips the array load test.
 // Use this for layers that don't support arrays (e.g., env layer).
-func SkipArrayTest() LayerTesterOption {
+// The reason parameter is required to document why the test is skipped.
+func SkipArrayTest(reason string) LayerTesterOption {
 	return func(lt *LayerTester) {
-		lt.skipArray = true
+		lt.skipArrayReason = reason
+	}
+}
+
+// SkipSaveArrayTest skips the array save operations test.
+// Use this for layers that support reading arrays but not writing via index.
+// The reason parameter is required to document why the test is skipped.
+func SkipSaveArrayTest(reason string) LayerTesterOption {
+	return func(lt *LayerTester) {
+		lt.skipSaveArrayReason = reason
 	}
 }
 
 // LayerTester provides utilities to verify Layer implementations.
 type LayerTester struct {
-	t         *testing.T
-	factory   LayerFactory
-	skipNull  bool
-	skipArray bool
+	t                   *testing.T
+	factory             LayerFactory
+	skipNullReason      string
+	skipArrayReason     string
+	skipSaveArrayReason string
 }
 
 // NewLayerTester creates a LayerTester for the given LayerFactory.
@@ -93,6 +134,10 @@ func (lt *LayerTester) TestAll() {
 	lt.t.Run("SpecialValues", lt.testSpecialValues)
 	lt.t.Run("ArrayPaths", lt.testArrayPaths)
 	lt.t.Run("Save", lt.testSave)
+	lt.t.Run("SaveEmptyChangeset", lt.testSaveEmptyChangeset)
+	lt.t.Run("SaveEmptyInput", lt.testSaveEmptyInput)
+	lt.t.Run("SaveSkipsInvalidPaths", lt.testSaveSkipsInvalidPaths)
+	lt.t.Run("SaveArrayOperations", lt.testSaveArrayOperations)
 }
 
 // testLoad verifies Load returns correct data.
@@ -101,17 +146,9 @@ func (lt *LayerTester) testLoad(t *testing.T) {
 	l := lt.factory(testData)
 
 	data, err := l.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load error = %v", err)
-	}
-
-	if data == nil {
-		t.Fatal("Load returned nil map")
-	}
-
-	if data["key"] != "value" {
-		t.Errorf("Load returned %v, want map with key=value", data)
-	}
+	requireNoError(t, err, "Load error = %v", err)
+	require(t, data != nil, "Load returned nil map")
+	check(t, data["key"] == "value", "Load returned %v, want map with key=value", data)
 }
 
 // testLoadEmpty verifies Load handles empty/nil data correctly.
@@ -121,16 +158,9 @@ func (lt *LayerTester) testLoadEmpty(t *testing.T) {
 		l := lt.factory(map[string]any{})
 
 		data, err := l.Load(context.Background())
-		if err != nil {
-			t.Fatalf("Load error = %v", err)
-		}
-
-		if data == nil {
-			t.Fatal("Load returned nil for empty map")
-		}
-		if len(data) != 0 {
-			t.Errorf("Load returned non-empty map for empty input: %v", data)
-		}
+		requireNoError(t, err, "Load error = %v", err)
+		require(t, data != nil, "Load returned nil for empty map")
+		check(t, len(data) == 0, "Load returned non-empty map for empty input: %v", data)
 	})
 
 	// Test with nil map (should return empty map, not nil)
@@ -138,16 +168,9 @@ func (lt *LayerTester) testLoadEmpty(t *testing.T) {
 		l := lt.factory(nil)
 
 		data, err := l.Load(context.Background())
-		if err != nil {
-			t.Fatalf("Load error = %v", err)
-		}
-
-		if data == nil {
-			t.Fatal("Load returned nil for nil map")
-		}
-		if len(data) != 0 {
-			t.Errorf("Load returned non-empty map for nil input: %v", data)
-		}
+		requireNoError(t, err, "Load error = %v", err)
+		require(t, data != nil, "Load returned nil for nil map")
+		check(t, len(data) == 0, "Load returned non-empty map for nil input: %v", data)
 	})
 }
 
@@ -162,9 +185,7 @@ func (lt *LayerTester) testLoadPath(t *testing.T) {
 	l := lt.factory(testData)
 
 	data, err := l.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load error = %v", err)
-	}
+	requireNoError(t, err, "Load error = %v", err)
 
 	tests := []struct {
 		path  string
@@ -179,14 +200,9 @@ func (lt *LayerTester) testLoadPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			got, ok := jsonptr.GetPath(data, tt.path)
-			if !ok {
-				t.Fatalf("GetPath(%q) returned ok=false", tt.path)
-			}
-
-			if !valuesEqual(got, tt.value) {
-				t.Errorf("GetPath(%q) = %v (%T), want %v (%T)",
-					tt.path, got, got, tt.value, tt.value)
-			}
+			require(t, ok, "GetPath(%q) returned ok=false", tt.path)
+			check(t, valuesEqual(got, tt.value), "GetPath(%q) = %v (%T), want %v (%T)",
+				tt.path, got, got, tt.value, tt.value)
 		})
 	}
 }
@@ -203,43 +219,27 @@ func (lt *LayerTester) testNestedPaths(t *testing.T) {
 	l := lt.factory(testData)
 
 	data, err := l.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load error = %v", err)
-	}
+	requireNoError(t, err, "Load error = %v", err)
 
 	// Get nested value
 	got, ok := jsonptr.GetPath(data, "/a/b/c")
-	if !ok {
-		t.Fatal("GetPath(/a/b/c) returned ok=false")
-	}
-	if got != "deep" {
-		t.Errorf("GetPath(/a/b/c) = %v, want \"deep\"", got)
-	}
+	require(t, ok, "GetPath(/a/b/c) returned ok=false")
+	check(t, got == "deep", "GetPath(/a/b/c) = %v, want \"deep\"", got)
 
 	// Get intermediate container
 	container, ok := jsonptr.GetPath(data, "/a/b")
-	if !ok {
-		t.Fatal("GetPath(/a/b) returned ok=false")
-	}
+	require(t, ok, "GetPath(/a/b) returned ok=false")
 	containerMap, isMap := container.(map[string]any)
-	if !isMap {
-		t.Fatalf("GetPath(/a/b) returned %T, want map[string]any", container)
-	}
-	if containerMap["c"] != "deep" {
-		t.Errorf("container[\"c\"] = %v, want \"deep\"", containerMap["c"])
-	}
+	require(t, isMap, "GetPath(/a/b) returned %T, want map[string]any", container)
+	check(t, containerMap["c"] == "deep", "container[\"c\"] = %v, want \"deep\"", containerMap["c"])
 
 	// Get root should contain nested structure
 	root, ok := jsonptr.GetPath(data, "")
-	if !ok {
-		t.Fatal("GetPath(\"\") returned ok=false")
-	}
+	require(t, ok, "GetPath(\"\") returned ok=false")
 	rootMap := root.(map[string]any)
 	aMap := rootMap["a"].(map[string]any)
 	bMap := aMap["b"].(map[string]any)
-	if bMap["c"] != "deep" {
-		t.Errorf("root structure incorrect: %v", rootMap)
-	}
+	check(t, bMap["c"] == "deep", "root structure incorrect: %v", rootMap)
 }
 
 // testSpecialValues verifies null, empty string, zero, and false are handled correctly.
@@ -256,7 +256,7 @@ func (lt *LayerTester) testSpecialValues(t *testing.T) {
 		{"false_bool", "false_bool", false, false},
 	}
 
-	// Build test data, excluding null_value if skipNull is set
+	// Build test data, excluding null_value if skipNullReason is set
 	// This is important for formats like TOML that don't support null values
 	// and would fail during MarshalTestData if null is included.
 	testData := map[string]any{
@@ -264,127 +264,90 @@ func (lt *LayerTester) testSpecialValues(t *testing.T) {
 		"zero_int":     0,
 		"false_bool":   false,
 	}
-	if !lt.skipNull {
+	if lt.skipNullReason == "" {
 		testData["null_value"] = nil
 	}
 	l := lt.factory(testData)
 
 	data, err := l.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load error = %v", err)
-	}
+	requireNoError(t, err, "Load error = %v", err)
 
 	// Verify all values
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.skipNull && lt.skipNull {
-				t.Skip("null values not supported by this layer")
+			if tt.skipNull && lt.skipNullReason != "" {
+				t.Skip(lt.skipNullReason)
 			}
 
 			path := "/" + tt.key
 			got, ok := jsonptr.GetPath(data, path)
-			if !ok {
-				t.Fatalf("GetPath(%q) returned ok=false", path)
-			}
-
-			if !valuesEqual(got, tt.value) {
-				t.Errorf("GetPath(%q) = %v (%T), want %v (%T)",
-					path, got, got, tt.value, tt.value)
-			}
+			require(t, ok, "GetPath(%q) returned ok=false", path)
+			check(t, valuesEqual(got, tt.value), "GetPath(%q) = %v (%T), want %v (%T)",
+				path, got, got, tt.value, tt.value)
 		})
 	}
 
 	// Verify non-existent path returns ok=false
 	t.Run("missing", func(t *testing.T) {
 		_, ok := jsonptr.GetPath(data, "/nonexistent")
-		if ok {
-			t.Error("GetPath(/nonexistent) returned ok=true, want false")
-		}
+		check(t, !ok, "GetPath(/nonexistent) returned ok=true, want false")
 	})
 
 	// Verify root contains all values
 	t.Run("root_contains_all", func(t *testing.T) {
 		root, ok := jsonptr.GetPath(data, "")
-		if !ok {
-			t.Fatal("GetPath(\"\") returned ok=false")
-		}
+		require(t, ok, "GetPath(\"\") returned ok=false")
 
 		rootMap, isMap := root.(map[string]any)
-		if !isMap {
-			t.Fatalf("GetPath(\"\") returned %T, want map[string]any", root)
-		}
+		require(t, isMap, "GetPath(\"\") returned %T, want map[string]any", root)
 
 		for _, tt := range tests {
 			// Skip null test if configured
-			if tt.skipNull && lt.skipNull {
+			if tt.skipNull && lt.skipNullReason != "" {
 				continue
 			}
 
 			val, exists := rootMap[tt.key]
-			if !exists {
-				t.Errorf("root missing key %q", tt.key)
-				continue
-			}
-
-			if !valuesEqual(val, tt.value) {
-				t.Errorf("root[%q] = %v (%T), want %v (%T)",
-					tt.key, val, val, tt.value, tt.value)
-			}
+			require(t, exists, "root missing key %q", tt.key)
+			check(t, valuesEqual(val, tt.value), "root[%q] = %v (%T), want %v (%T)",
+				tt.key, val, val, tt.value, tt.value)
 		}
 	})
 }
 
 // testArrayPaths verifies array/slice path operations work correctly.
 func (lt *LayerTester) testArrayPaths(t *testing.T) {
-	if lt.skipArray {
-		t.Skip("arrays not supported by this layer")
+	if lt.skipArrayReason != "" {
+		t.Skip(lt.skipArrayReason)
 	}
 
 	testData := map[string]any{"items": []any{"a", "b", "c"}}
 	l := lt.factory(testData)
 
 	data, err := l.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load error = %v", err)
-	}
+	requireNoError(t, err, "Load error = %v", err)
 
 	// Get entire array
 	got, ok := jsonptr.GetPath(data, "/items")
-	if !ok {
-		t.Fatal("GetPath(/items) returned ok=false")
-	}
+	require(t, ok, "GetPath(/items) returned ok=false")
 
 	gotArr, isArr := got.([]any)
-	if !isArr {
-		t.Fatalf("GetPath(/items) returned %T, want []any", got)
-	}
+	require(t, isArr, "GetPath(/items) returned %T, want []any", got)
 
-	if len(gotArr) != 3 {
-		t.Fatalf("len(items) = %d, want 3", len(gotArr))
-	}
+	require(t, len(gotArr) == 3, "len(items) = %d, want 3", len(gotArr))
 
 	// Get array element by index
 	elem, ok := jsonptr.GetPath(data, "/items/0")
-	if !ok {
-		t.Fatal("GetPath(/items/0) returned ok=false")
-	}
-	if elem != "a" {
-		t.Errorf("GetPath(/items/0) = %v, want \"a\"", elem)
-	}
+	require(t, ok, "GetPath(/items/0) returned ok=false")
+	check(t, elem == "a", "GetPath(/items/0) = %v, want \"a\"", elem)
 
 	// Get root should contain array
 	root, ok := jsonptr.GetPath(data, "")
-	if !ok {
-		t.Fatal("GetPath(\"\") returned ok=false")
-	}
+	require(t, ok, "GetPath(\"\") returned ok=false")
 	rootMap := root.(map[string]any)
 	rootItems, ok := rootMap["items"].([]any)
-	if !ok {
-		t.Fatalf("root[\"items\"] is %T, want []any", rootMap["items"])
-	}
-	if len(rootItems) != 3 {
-		t.Errorf("len(root[\"items\"]) = %d, want 3", len(rootItems))
-	}
+	require(t, ok, "root[\"items\"] is %T, want []any", rootMap["items"])
+	check(t, len(rootItems) == 3, "len(root[\"items\"]) = %d, want 3", len(rootItems))
 }
 
 // testSave verifies Save modifies data correctly (for writable layers).
@@ -404,21 +367,13 @@ func (lt *LayerTester) testSave(t *testing.T) {
 		var patches document.JSONPatchSet
 		patches.Add("/new_key", "new_value")
 
-		if err := l.Save(ctx, patches); err != nil {
-			t.Fatalf("Save error = %v", err)
-		}
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
 
 		data, err := l.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load after Save error = %v", err)
-		}
-
-		if data["new_key"] != "new_value" {
-			t.Errorf("after Add, new_key = %v, want new_value", data["new_key"])
-		}
-		if data["existing"] != "value" {
-			t.Errorf("after Add, existing = %v, want value", data["existing"])
-		}
+		requireNoError(t, err, "Load after Save error = %v", err)
+		check(t, data["new_key"] == "new_value", "after Add, new_key = %v, want new_value", data["new_key"])
+		check(t, data["existing"] == "value", "after Add, existing = %v, want value", data["existing"])
 	})
 
 	// Apply replace operation
@@ -427,18 +382,12 @@ func (lt *LayerTester) testSave(t *testing.T) {
 		var patches document.JSONPatchSet
 		patches.Replace("/existing", "replaced")
 
-		if err := l.Save(ctx, patches); err != nil {
-			t.Fatalf("Save error = %v", err)
-		}
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
 
 		data, err := l.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load after Save error = %v", err)
-		}
-
-		if data["existing"] != "replaced" {
-			t.Errorf("after Replace, existing = %v, want replaced", data["existing"])
-		}
+		requireNoError(t, err, "Load after Save error = %v", err)
+		check(t, data["existing"] == "replaced", "after Replace, existing = %v, want replaced", data["existing"])
 	})
 
 	// Apply remove operation
@@ -447,18 +396,13 @@ func (lt *LayerTester) testSave(t *testing.T) {
 		var patches document.JSONPatchSet
 		patches.Remove("/existing")
 
-		if err := l.Save(ctx, patches); err != nil {
-			t.Fatalf("Save error = %v", err)
-		}
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
 
 		data, err := l.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load after Save error = %v", err)
-		}
-
-		if _, exists := data["existing"]; exists {
-			t.Error("after Remove, existing key still present")
-		}
+		requireNoError(t, err, "Load after Save error = %v", err)
+		_, exists := data["existing"]
+		check(t, !exists, "after Remove, existing key still present")
 	})
 
 	// Apply nested add operation
@@ -467,22 +411,219 @@ func (lt *LayerTester) testSave(t *testing.T) {
 		var patches document.JSONPatchSet
 		patches.Add("/x/y/z", "nested_value")
 
-		if err := l.Save(ctx, patches); err != nil {
-			t.Fatalf("Save error = %v", err)
-		}
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
 
 		data, err := l.Load(ctx)
-		if err != nil {
-			t.Fatalf("Load after Save error = %v", err)
-		}
+		requireNoError(t, err, "Load after Save error = %v", err)
 
 		got, ok := jsonptr.GetPath(data, "/x/y/z")
-		if !ok {
-			t.Fatal("GetPath(/x/y/z) returned ok=false after Save")
+		require(t, ok, "GetPath(/x/y/z) returned ok=false after Save")
+		check(t, got == "nested_value", "GetPath(/x/y/z) = %v, want \"nested_value\"", got)
+	})
+}
+
+// testSaveEmptyChangeset verifies Save with empty/nil changeset preserves data.
+func (lt *LayerTester) testSaveEmptyChangeset(t *testing.T) {
+	initialData := map[string]any{"existing": "value"}
+	l := lt.factory(initialData)
+
+	if !l.CanSave() {
+		t.Skip("layer does not support Save")
+	}
+
+	ctx := context.Background()
+
+	// Save with nil changeset
+	t.Run("nil_changeset", func(t *testing.T) {
+		l := lt.factory(initialData)
+
+		err := l.Save(ctx, nil)
+		requireNoError(t, err, "Save(nil) error = %v", err)
+
+		data, err := l.Load(ctx)
+		requireNoError(t, err, "Load after Save error = %v", err)
+		check(t, data["existing"] == "value", "after Save(nil), existing = %v, want value", data["existing"])
+	})
+
+	// Save with empty changeset
+	t.Run("empty_changeset", func(t *testing.T) {
+		l := lt.factory(initialData)
+
+		err := l.Save(ctx, document.JSONPatchSet{})
+		requireNoError(t, err, "Save(empty) error = %v", err)
+
+		data, err := l.Load(ctx)
+		requireNoError(t, err, "Load after Save error = %v", err)
+		check(t, data["existing"] == "value", "after Save(empty), existing = %v, want value", data["existing"])
+	})
+}
+
+// testSaveEmptyInput verifies Save creates new document from empty input.
+func (lt *LayerTester) testSaveEmptyInput(t *testing.T) {
+	// Start with empty data
+	l := lt.factory(nil)
+
+	if !l.CanSave() {
+		t.Skip("layer does not support Save")
+	}
+
+	ctx := context.Background()
+
+	var patches document.JSONPatchSet
+	patches.Add("/new_key", "new_value")
+
+	err := l.Save(ctx, patches)
+	requireNoError(t, err, "Save error = %v", err)
+
+	data, err := l.Load(ctx)
+	requireNoError(t, err, "Load after Save error = %v", err)
+	check(t, data["new_key"] == "new_value", "after Save, new_key = %v, want new_value", data["new_key"])
+}
+
+// testSaveSkipsInvalidPaths verifies Save skips invalid paths without error.
+func (lt *LayerTester) testSaveSkipsInvalidPaths(t *testing.T) {
+	initialData := map[string]any{"existing": "value"}
+	l := lt.factory(initialData)
+
+	if !l.CanSave() {
+		t.Skip("layer does not support Save")
+	}
+
+	ctx := context.Background()
+
+	// Mix of valid and invalid operations
+	var patches document.JSONPatchSet
+	patches = append(patches, document.JSONPatch{Op: document.PatchOpAdd, Path: "relative", Value: 1})    // invalid: relative path
+	patches = append(patches, document.JSONPatch{Op: document.PatchOpAdd, Path: "", Value: 1})            // invalid: root path
+	patches = append(patches, document.JSONPatch{Op: document.PatchOpRemove, Path: "also_relative"})      // invalid: relative path
+	patches.Add("/valid_key", "valid_value")                                                               // valid
+	patches.Replace("/existing", "replaced")                                                               // valid
+
+	err := l.Save(ctx, patches)
+	requireNoError(t, err, "Save error = %v", err)
+
+	data, err := l.Load(ctx)
+	requireNoError(t, err, "Load after Save error = %v", err)
+
+	// Valid operations should be applied
+	check(t, data["valid_key"] == "valid_value", "valid_key = %v, want valid_value", data["valid_key"])
+	check(t, data["existing"] == "replaced", "existing = %v, want replaced", data["existing"])
+
+	// Invalid operations should be skipped (keys should not exist)
+	_, hasRelative := data["relative"]
+	check(t, !hasRelative, "relative key should not exist")
+	_, hasAlsoRelative := data["also_relative"]
+	check(t, !hasAlsoRelative, "also_relative key should not exist")
+}
+
+// testSaveArrayOperations verifies Save handles array Add/Replace/Remove operations.
+func (lt *LayerTester) testSaveArrayOperations(t *testing.T) {
+	if lt.skipArrayReason != "" {
+		t.Skip(lt.skipArrayReason)
+	}
+	if lt.skipSaveArrayReason != "" {
+		t.Skip(lt.skipSaveArrayReason)
+	}
+
+	ctx := context.Background()
+
+	// Test adding to array
+	t.Run("AddToArray", func(t *testing.T) {
+		initialData := map[string]any{"items": []any{"a", "b"}}
+		l := lt.factory(initialData)
+
+		if !l.CanSave() {
+			t.Skip("layer does not support Save")
 		}
-		if got != "nested_value" {
-			t.Errorf("GetPath(/x/y/z) = %v, want \"nested_value\"", got)
+
+		var patches document.JSONPatchSet
+		patches.Add("/items/2", "c")
+
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
+
+		data, err := l.Load(ctx)
+		requireNoError(t, err, "Load after Save error = %v", err)
+
+		items, ok := data["items"].([]any)
+		require(t, ok, "items is %T, want []any", data["items"])
+		require(t, len(items) == 3, "len(items) = %d, want 3", len(items))
+		check(t, items[2] == "c", "items[2] = %v, want c", items[2])
+	})
+
+	// Test replacing array element
+	t.Run("ReplaceArrayElement", func(t *testing.T) {
+		initialData := map[string]any{"items": []any{"a", "b", "c"}}
+		l := lt.factory(initialData)
+
+		if !l.CanSave() {
+			t.Skip("layer does not support Save")
 		}
+
+		var patches document.JSONPatchSet
+		patches.Replace("/items/1", "B")
+
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
+
+		data, err := l.Load(ctx)
+		requireNoError(t, err, "Load after Save error = %v", err)
+
+		items, ok := data["items"].([]any)
+		require(t, ok, "items is %T, want []any", data["items"])
+		check(t, items[1] == "B", "items[1] = %v, want B", items[1])
+	})
+
+	// Test removing array element
+	t.Run("RemoveArrayElement", func(t *testing.T) {
+		initialData := map[string]any{"items": []any{"a", "b", "c"}}
+		l := lt.factory(initialData)
+
+		if !l.CanSave() {
+			t.Skip("layer does not support Save")
+		}
+
+		var patches document.JSONPatchSet
+		patches.Remove("/items/1")
+
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
+
+		data, err := l.Load(ctx)
+		requireNoError(t, err, "Load after Save error = %v", err)
+
+		items, ok := data["items"].([]any)
+		require(t, ok, "items is %T, want []any", data["items"])
+		require(t, len(items) == 2, "len(items) = %d, want 2", len(items))
+		check(t, items[0] == "a", "items[0] = %v, want a", items[0])
+		check(t, items[1] == "c", "items[1] = %v, want c", items[1])
+	})
+
+	// Test nested array operations
+	t.Run("NestedArrayAdd", func(t *testing.T) {
+		initialData := map[string]any{"matrix": []any{[]any{1, 2}}}
+		l := lt.factory(initialData)
+
+		if !l.CanSave() {
+			t.Skip("layer does not support Save")
+		}
+
+		var patches document.JSONPatchSet
+		patches.Add("/matrix/0/2", 3)
+
+		err := l.Save(ctx, patches)
+		requireNoError(t, err, "Save error = %v", err)
+
+		data, err := l.Load(ctx)
+		requireNoError(t, err, "Load after Save error = %v", err)
+
+		matrix, ok := data["matrix"].([]any)
+		require(t, ok, "matrix is %T, want []any", data["matrix"])
+		row, ok := matrix[0].([]any)
+		require(t, ok, "matrix[0] is %T, want []any", matrix[0])
+		require(t, len(row) == 3, "len(matrix[0]) = %d, want 3", len(row))
+		check(t, valuesEqual(row[2], 3), "matrix[0][2] = %v, want 3", row[2])
 	})
 }
 

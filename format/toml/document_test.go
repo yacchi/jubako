@@ -62,8 +62,9 @@ func TestDocument_MarshalTestData_NullValue(t *testing.T) {
 }
 
 // TestDocument_Compliance runs the standard jktest compliance tests.
-// TOML does not support null values, so that test is skipped.
 func TestDocument_Compliance(t *testing.T) {
 	factory := jktest.DocumentLayerFactory(New())
-	jktest.NewLayerTester(t, factory, jktest.SkipNullTest()).TestAll()
+	jktest.NewLayerTester(t, factory,
+		jktest.SkipNullTest("TOML format does not support null values"),
+	).TestAll()
 }
