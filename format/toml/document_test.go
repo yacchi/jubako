@@ -10,13 +10,6 @@ import (
 	"github.com/yacchi/jubako/jktest"
 )
 
-func TestDocument_Format(t *testing.T) {
-	doc := New()
-	if doc.Format() != document.FormatTOML {
-		t.Errorf("Format() = %v, want %v", doc.Format(), document.FormatTOML)
-	}
-}
-
 // TestDocument_Apply_CommentPreservation verifies TOML-specific comment preservation.
 func TestDocument_Apply_CommentPreservation(t *testing.T) {
 	input := []byte("# heading\n[server]\nhost = \"localhost\" # inline\nport = 8080\n")
@@ -64,8 +57,7 @@ func TestDocument_MarshalTestData_NullValue(t *testing.T) {
 
 // TestDocument_Compliance runs the standard jktest compliance tests.
 func TestDocument_Compliance(t *testing.T) {
-	factory := jktest.DocumentLayerFactory(New())
-	jktest.NewLayerTester(t, factory,
+	jktest.NewDocumentLayerTester(t, New(),
 		jktest.SkipNullTest("TOML format does not support null values"),
 	).TestAll()
 }

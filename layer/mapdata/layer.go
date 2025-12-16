@@ -13,6 +13,8 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // Layer is a configuration layer backed by a map[string]any.
@@ -23,7 +25,10 @@ type Layer struct {
 	data map[string]any
 }
 
-// Ensure Layer implements layer.Layer interface.
+// TypeMapdata is the source type identifier for in-memory map layers.
+const TypeMapdata types.SourceType = "mapdata"
+
+// Ensure Layer implements layer.Layer interface (which includes types.DetailsFiller).
 var _ layer.Layer = (*Layer)(nil)
 
 // New creates a new mapdata layer with the given data.
@@ -93,4 +98,17 @@ func (l *Layer) CanSave() bool {
 // Data returns a deep copy of the current layer data.
 func (l *Layer) Data() map[string]any {
 	return container.DeepCopyMap(l.data)
+}
+
+// FormatMapdata is the document format identifier for in-memory map layers.
+// Map layers don't have a traditional document format like YAML or JSON,
+// but this identifier makes it clear the data is stored in-memory as a map.
+const FormatMapdata types.DocumentFormat = "mapdata"
+
+// FillDetails populates the Details struct with metadata from this layer.
+// Mapdata layers use a noop watcher since they are in-memory data structures.
+func (l *Layer) FillDetails(d *types.Details) {
+	d.Source = TypeMapdata
+	d.Format = FormatMapdata
+	d.Watcher = watcher.TypeNoop
 }

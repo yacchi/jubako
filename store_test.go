@@ -14,6 +14,7 @@ import (
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/layer/mapdata"
 	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/types"
 )
 
 type testConfig struct {
@@ -881,7 +882,8 @@ func TestStore_ListLayers(t *testing.T) {
 
 type noSaveLayer struct{ name layer.Name }
 
-func (l *noSaveLayer) Name() layer.Name { return l.name }
+func (l *noSaveLayer) Name() layer.Name                    { return l.name }
+func (l *noSaveLayer) FillDetails(d *types.Details)        {}
 func (l *noSaveLayer) Load(ctx context.Context) (map[string]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -899,7 +901,10 @@ type pathMemSource struct {
 	canSave bool
 }
 
-func (s *pathMemSource) Path() string { return s.path }
+func (s *pathMemSource) Type() source.SourceType { return "mem" }
+func (s *pathMemSource) FillDetails(d *types.Details) {
+	d.Path = s.path
+}
 func (s *pathMemSource) Load(ctx context.Context) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -926,7 +931,8 @@ func (s *pathMemSource) CanSave() bool { return s.canSave }
 
 type failingSaveLayer struct{ name layer.Name }
 
-func (l *failingSaveLayer) Name() layer.Name { return l.name }
+func (l *failingSaveLayer) Name() layer.Name             { return l.name }
+func (l *failingSaveLayer) FillDetails(d *types.Details) {}
 func (l *failingSaveLayer) Load(ctx context.Context) (map[string]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -940,7 +946,8 @@ func (l *failingSaveLayer) CanSave() bool { return true }
 
 type nilDataLayer struct{ name layer.Name }
 
-func (l *nilDataLayer) Name() layer.Name { return l.name }
+func (l *nilDataLayer) Name() layer.Name             { return l.name }
+func (l *nilDataLayer) FillDetails(d *types.Details) {}
 func (l *nilDataLayer) Load(ctx context.Context) (map[string]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -965,8 +972,8 @@ func TestStore_ReadOnlyAndLayerInfo(t *testing.T) {
 	if info == nil {
 		t.Fatal("GetLayerInfo() returned nil")
 	}
-	if got := info.Format(); got != "" {
-		t.Fatalf("Format() = %q, want empty string for non-format layers", got)
+	if got := info.Format(); got != "mapdata" {
+		t.Fatalf("Format() = %q, want %q for mapdata layers", got, "mapdata")
 	}
 	if !info.ReadOnly() {
 		t.Fatal("ReadOnly() = false, want true")
@@ -1511,6 +1518,36 @@ func TestStore_GetLayerInfo_NotFound(t *testing.T) {
 	store := New[testConfig]()
 	if got := store.GetLayerInfo("missing"); got != nil {
 		t.Fatalf("GetLayerInfo(missing) = %v, want nil", got)
+	}
+}
+
+func TestStore_GetLayerInfo_NoWatch(t *testing.T) {
+	store := New[testConfig]()
+
+	// Add layer with NoWatch
+	if err := store.Add(mapdata.New("nowatch", map[string]any{"key": "value"}), WithNoWatch()); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	// Add layer without NoWatch
+	if err := store.Add(mapdata.New("watch", map[string]any{"key": "value"})); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	info := store.GetLayerInfo("nowatch")
+	if info == nil {
+		t.Fatal("GetLayerInfo() returned nil")
+	}
+	if !info.NoWatch() {
+		t.Error("NoWatch() = false, want true for nowatch layer")
+	}
+
+	info = store.GetLayerInfo("watch")
+	if info == nil {
+		t.Fatal("GetLayerInfo() returned nil")
+	}
+	if info.NoWatch() {
+		t.Error("NoWatch() = true, want false for watch layer")
 	}
 }
 

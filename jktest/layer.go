@@ -28,46 +28,14 @@ package jktest
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
-	"github.com/yacchi/jubako/source"
 )
-
-type testT interface {
-	Helper()
-	Fatalf(format string, args ...any)
-	Errorf(format string, args ...any)
-	Skip(args ...any)
-	Skipf(format string, args ...any)
-}
-
-func require(t testT, cond bool, format string, args ...any) {
-	t.Helper()
-	if !cond {
-		t.Fatalf(format, args...)
-	}
-}
-
-func requireNoError(t testT, err error, format string, args ...any) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf(format, args...)
-	}
-}
-
-func check(t testT, cond bool, format string, args ...any) {
-	t.Helper()
-	if !cond {
-		t.Errorf(format, args...)
-	}
-}
 
 // LayerFactory creates a Layer initialized with the given test data.
 // The factory is called for each test case to ensure test isolation.
@@ -664,118 +632,5 @@ func flattenMap(prefix, delimiter, currentPath string, data map[string]any, resu
 		default:
 			*result = append(*result, fmt.Sprintf("%s%s=%v", prefix, envKey, v))
 		}
-	}
-}
-
-// isUnsupportedError checks if the error is an UnsupportedStructureError.
-func isUnsupportedError(err error) bool {
-	var unsupported *document.UnsupportedStructureError
-	return errors.As(err, &unsupported)
-}
-
-// valuesEqual compares two values for equality, handling numeric type conversions.
-func valuesEqual(got, want any) bool {
-	// Handle nil
-	if got == nil && want == nil {
-		return true
-	}
-	if got == nil || want == nil {
-		return false
-	}
-
-	// Handle numeric type conversions (JSON/YAML may decode as different types)
-	gotNum, gotIsNum := toFloat64(got)
-	wantNum, wantIsNum := toFloat64(want)
-	if gotIsNum && wantIsNum {
-		return gotNum == wantNum
-	}
-
-	// Handle string comparison for env layer (which stores everything as strings)
-	if gotStr, ok := got.(string); ok {
-		if wantStr, ok := want.(string); ok {
-			return gotStr == wantStr
-		}
-		// Compare string representation
-		return gotStr == fmt.Sprintf("%v", want)
-	}
-
-	// Use reflect.DeepEqual for other types
-	return reflect.DeepEqual(got, want)
-}
-
-// toFloat64 converts numeric types to float64 for comparison.
-func toFloat64(v any) (float64, bool) {
-	switch n := v.(type) {
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	case float64:
-		return n, true
-	default:
-		return 0, false
-	}
-}
-
-// TestSource is an in-memory source that supports both Load and Save.
-// It is useful for testing Document implementations with LayerTester.
-type TestSource struct {
-	data []byte
-}
-
-// Ensure TestSource implements source.Source.
-var _ source.Source = (*TestSource)(nil)
-
-// NewTestSource creates a new TestSource with the given initial data.
-func NewTestSource(data []byte) *TestSource {
-	return &TestSource{data: data}
-}
-
-// Load returns the current data.
-func (s *TestSource) Load(ctx context.Context) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	result := make([]byte, len(s.data))
-	copy(result, s.data)
-	return result, nil
-}
-
-// Save applies the update function and stores the result.
-func (s *TestSource) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	newData, err := updateFunc(s.data)
-	if err != nil {
-		return err
-	}
-	s.data = newData
-	return nil
-}
-
-// CanSave returns true.
-func (s *TestSource) CanSave() bool {
-	return true
-}
-
-// DocumentLayerFactory creates a LayerFactory for testing Document implementations.
-// The returned factory creates a FileLayer using TestSource and the given Document.
-//
-// Example:
-//
-//	func TestYAMLDocument_Compliance(t *testing.T) {
-//	    factory := jktest.DocumentLayerFactory(yaml.New())
-//	    jktest.NewLayerTester(t, factory).TestAll()
-//	}
-func DocumentLayerFactory(doc document.Document) LayerFactory {
-	return func(data map[string]any) layer.Layer {
-		// Marshal test data to bytes using the document
-		bytes, err := doc.MarshalTestData(data)
-		if err != nil {
-			// Return a layer that will fail on Load
-			return layer.New("test", NewTestSource(nil), doc)
-		}
-		return layer.New("test", NewTestSource(bytes), doc)
 	}
 }

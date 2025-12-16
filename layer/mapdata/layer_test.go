@@ -7,6 +7,8 @@ import (
 
 	"github.com/yacchi/jubako/jktest"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 func TestNew(t *testing.T) {
@@ -175,4 +177,21 @@ func TestLayer_Compliance(t *testing.T) {
 		return New("test", data)
 	}
 	jktest.NewLayerTester(t, factory).TestAll()
+}
+
+func TestLayer_FillDetails(t *testing.T) {
+	l := New("test", nil)
+
+	var d types.Details
+	l.FillDetails(&d)
+
+	if d.Source != TypeMapdata {
+		t.Errorf("Source = %q, want %q", d.Source, TypeMapdata)
+	}
+	if d.Format != FormatMapdata {
+		t.Errorf("Format = %q, want %q", d.Format, FormatMapdata)
+	}
+	if d.Watcher != watcher.TypeNoop {
+		t.Errorf("Watcher = %q, want %q", d.Watcher, watcher.TypeNoop)
+	}
 }

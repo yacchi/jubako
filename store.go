@@ -13,6 +13,7 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/types"
 )
 
 // subscriber wraps a callback function with a unique ID for reliable unsubscription.
@@ -54,6 +55,9 @@ type LayerInfo interface {
 
 	// Dirty returns whether the layer has been modified but not yet saved.
 	Dirty() bool
+
+	// NoWatch returns whether watching is disabled for this layer.
+	NoWatch() bool
 }
 
 // AddOption is a functional option for configuring layer addition.
@@ -64,6 +68,7 @@ type addOptions struct {
 	priority    layer.Priority
 	hasPriority bool
 	readOnly    bool
+	noWatch     bool
 }
 
 // WithPriority sets a specific priority for the layer.
@@ -85,17 +90,30 @@ func WithReadOnly() AddOption {
 	}
 }
 
+// WithNoWatch disables watching for this layer.
+// When Store.Watch() is called, layers marked with WithNoWatch will be skipped.
+// This is useful for layers that should not trigger reloads (e.g., static defaults,
+// embedded configurations).
+func WithNoWatch() AddOption {
+	return func(o *addOptions) {
+		o.noWatch = true
+	}
+}
+
 // layerEntry holds a layer with its priority for internal use.
 // It implements LayerInfo interface to avoid allocating new structs during traversal.
 type layerEntry struct {
 	layer    layer.Layer
 	priority layer.Priority
 
-	// Pre-computed values for efficiency during traversal
-	path string // cached file path (empty for non-file sources)
+	// Pre-computed layer details (path, format, etc.)
+	details types.Details
 
 	// readOnly indicates whether the layer is marked as read-only by the user
 	readOnly bool
+
+	// noWatch indicates whether watching is disabled for this layer
+	noWatch bool
 
 	// dirty indicates whether the layer has been modified but not yet saved
 	dirty bool
@@ -118,18 +136,15 @@ func (e *layerEntry) Priority() layer.Priority {
 }
 
 // Format returns the document format.
-// Returns empty string if the layer doesn't implement FormatProvider.
+// Returns empty string if not available.
 func (e *layerEntry) Format() document.DocumentFormat {
-	if fp, ok := e.layer.(layer.FormatProvider); ok {
-		return fp.Format()
-	}
-	return ""
+	return e.details.Format
 }
 
 // Path returns the file path for file-based layers.
 // Returns empty string for non-file layers.
 func (e *layerEntry) Path() string {
-	return e.path
+	return e.details.Path
 }
 
 // Loaded returns whether the layer has been loaded.
@@ -155,6 +170,11 @@ func (e *layerEntry) Writable() bool {
 // Dirty returns whether the layer has been modified but not yet saved.
 func (e *layerEntry) Dirty() bool {
 	return e.dirty
+}
+
+// NoWatch returns whether watching is disabled for this layer.
+func (e *layerEntry) NoWatch() bool {
+	return e.noWatch
 }
 
 // findLayerLocked finds a layer by name.
@@ -327,14 +347,11 @@ func (s *Store[T]) Add(l layer.Layer, opts ...AddOption) error {
 		layer:    l,
 		priority: priority,
 		readOnly: options.readOnly,
+		noWatch:  options.noWatch,
 	}
 
-	// Try to get file path from FileLayer's source
-	if fl, ok := l.(*layer.FileLayer); ok {
-		if pp, ok := fl.Source().(PathProvider); ok {
-			entry.path = pp.Path()
-		}
-	}
+	// Populate layer details (Layer interface includes DetailsFiller)
+	l.FillDetails(&entry.details)
 
 	s.layers = append(s.layers, entry)
 
@@ -879,12 +896,6 @@ func (s *Store[T]) Walk(fn func(ctx WalkContext) bool) {
 			return
 		}
 	}
-}
-
-// PathProvider is an optional interface that sources can implement
-// to provide their file path.
-type PathProvider interface {
-	Path() string
 }
 
 // GetLayerInfo returns metadata about a specific layer.

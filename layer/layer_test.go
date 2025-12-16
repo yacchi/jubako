@@ -9,6 +9,7 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/format/json"
 	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/types"
 )
 
 type memSource struct {
@@ -16,6 +17,8 @@ type memSource struct {
 	canSave bool
 	loadErr error
 }
+
+func (s *memSource) Type() source.SourceType { return "mem" }
 
 func (s *memSource) Load(ctx context.Context) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
@@ -58,16 +61,25 @@ func TestFileLayer_LoadSaveAndMetadata(t *testing.T) {
 	if l.Name() != "test" {
 		t.Fatalf("Name() = %q, want %q", l.Name(), "test")
 	}
-	if got := l.Format(); got != document.FormatJSON {
-		t.Fatalf("Format() = %q, want %q", got, document.FormatJSON)
-	}
 	if !l.CanSave() {
 		t.Fatal("CanSave() = false, want true")
 	}
-	if l.Source() != src {
-		t.Fatal("Source() did not return the original source")
+	// Layer interface now includes DetailsFiller, so FillDetails can be called directly
+	details := &types.Details{}
+	l.FillDetails(details)
+	// Check Format is set from document
+	if details.Format != document.FormatJSON {
+		t.Fatalf("FillDetails() Format = %q, want %q", details.Format, document.FormatJSON)
 	}
-	if l.Document() != doc {
+	// memSource doesn't implement DetailsFiller, so details.Path should be empty
+	if details.Path != "" {
+		t.Fatalf("FillDetails() Path = %q, want empty", details.Path)
+	}
+	dp, ok := l.(DocumentProvider)
+	if !ok {
+		t.Fatal("layer does not implement DocumentProvider")
+	}
+	if dp.Document() != doc {
 		t.Fatal("Document() did not return the original document")
 	}
 

@@ -5,6 +5,8 @@
 // serialization only. Data loading and caching is managed by Source and Layer.
 package document
 
+import "github.com/yacchi/jubako/types"
+
 // Document represents a format handler for configuration data.
 //
 // Document is stateless and does not cache data internally.
@@ -71,8 +73,9 @@ type Document interface {
 	MarshalTestData(data map[string]any) ([]byte, error)
 }
 
-// DocumentFormat represents the format of a configuration document.
-type DocumentFormat string
+// DocumentFormat is an alias for types.DocumentFormat.
+// This allows document implementations to use document.DocumentFormat directly.
+type DocumentFormat = types.DocumentFormat
 
 const (
 	// FormatYAML represents YAML format (using gopkg.in/yaml.v3).

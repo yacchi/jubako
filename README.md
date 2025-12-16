@@ -24,6 +24,7 @@ items, and together they form a complete set - much like how this library manage
     - [Custom Decoder](#custom-decoder)
 - [API Reference](#api-reference)
     - [Store[T]](#storet)
+        - [Hot Reload (Watch)](#hot-reload-watch)
     - [Origin Tracking](#origin-tracking)
     - [Layer Information](#layer-information)
 - [Supported Formats](#supported-formats)
@@ -44,6 +45,7 @@ items, and together they form a complete set - much like how this library manage
   indentation, etc.)
 - **Type-safe access** - Generics-based API with compile-time type checking
 - **Change notifications** - Subscribe to configuration changes
+- **Hot reload** - Automatically reload configuration when sources change (`Store.Watch`)
 
 ## Installation
 
@@ -557,6 +559,41 @@ func main() {
 }
 ```
 
+#### Hot Reload (Watch)
+
+`Store.Watch` watches configuration layers for changes, automatically reloads the store, and notifies subscribers.
+Typically, call `Load` once before `Watch` to materialize an initial snapshot.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	stop, err := store.Watch(ctx, jubako.DefaultStoreWatchConfig())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stop(context.Background())
+}
+```
+
+Notes:
+
+- Layers added with `jubako.WithNoWatch()` are skipped.
+- `StoreWatchConfig.OnError` receives `layer.Name("")` for store-level errors (e.g., materialization failures).
+- `StoreWatchConfig.WatcherOpts` configures polling behavior (e.g., `watcher.WithPollInterval`, `watcher.WithCompareFunc`); subscription-based watchers may ignore polling-specific options.
+
 #### Modifying and Saving
 
 ```go
@@ -962,8 +999,10 @@ type Document interface {
 ### Layer Interface
 
 Layer represents a configuration source that loads data as `map[string]any` and
-can optionally save changes via a `document.JSONPatchSet`. The standard
-implementation is `layer.FileLayer`, created by `layer.New(source, document)`:
+can optionally save changes via a `document.JSONPatchSet`. Use `layer.New(name, source, document)`
+to create a standard layer. The returned `Layer` also implements optional interfaces
+(`SourceProvider`, `DocumentProvider`, `FormatProvider`, `WatchableLayer`) for accessing
+the underlying components:
 
 ```go
 package layer

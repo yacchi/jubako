@@ -9,13 +9,6 @@ import (
 	"github.com/yacchi/jubako/jktest"
 )
 
-func TestDocument_Format(t *testing.T) {
-	doc := New()
-	if doc.Format() != document.FormatJSONC {
-		t.Errorf("Format() = %v, want %v", doc.Format(), document.FormatJSONC)
-	}
-}
-
 // TestDocument_Apply_CommentPreservation verifies JSONC-specific comment preservation.
 func TestDocument_Apply_CommentPreservation(t *testing.T) {
 	input := []byte(`{
@@ -50,8 +43,7 @@ func TestDocument_Apply_CommentPreservation(t *testing.T) {
 
 // TestDocument_Compliance runs the standard jktest compliance tests.
 func TestDocument_Compliance(t *testing.T) {
-	factory := jktest.DocumentLayerFactory(New())
-	jktest.NewLayerTester(t, factory,
+	jktest.NewDocumentLayerTester(t, New(),
 		jktest.SkipSaveArrayTest("hujson Patch API does not support array append at index == len"),
 	).TestAll()
 }

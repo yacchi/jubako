@@ -8,6 +8,8 @@ import (
 
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // Priority defines the priority of a configuration layer.
@@ -20,7 +22,12 @@ type Name string
 // Layer represents a configuration source that can be loaded and optionally saved.
 // Implementations handle the details of loading from various sources (files, environment, etc.).
 // Priority is not part of the Layer interface - it's managed by the Store when adding layers.
+//
+// All Layer implementations must also implement types.DetailsFiller to provide
+// metadata about the layer (source type, document format, watcher type, etc.).
 type Layer interface {
+	types.DetailsFiller
+
 	// Name returns the unique identifier for this layer.
 	Name() Name
 
@@ -38,36 +45,43 @@ type Layer interface {
 	CanSave() bool
 }
 
-// FileLayer is a Layer implementation that combines a Source and Document.
-// This is the standard layer type for file-based configurations (YAML, TOML, JSON, etc.).
-type FileLayer struct {
+// basicLayer is the standard Layer implementation that combines a Source and Document.
+// It is not exported; use the New() function to create instances.
+type basicLayer struct {
 	name   Name
 	source source.Source
 	doc    document.Document
 }
 
-// FormatProvider is an optional interface that layers can implement
-// to expose their document format. This is useful for introspection
-// and debugging purposes.
-type FormatProvider interface {
-	Format() document.DocumentFormat
+// DocumentProvider is an optional interface that layers can implement
+// to expose their underlying document. This is useful for accessing
+// document-specific methods.
+type DocumentProvider interface {
+	Document() document.Document
 }
 
-// Ensure FileLayer implements Layer interface.
-var _ Layer = (*FileLayer)(nil)
+// Ensure basicLayer implements Layer interface (which includes types.DetailsFiller).
+var _ Layer = (*basicLayer)(nil)
 
-// Ensure FileLayer implements FormatProvider interface.
-var _ FormatProvider = (*FileLayer)(nil)
+// Ensure basicLayer implements DocumentProvider interface.
+var _ DocumentProvider = (*basicLayer)(nil)
 
-// New creates a new FileLayer with the given Source and Document.
+// Ensure basicLayer implements WatchableLayer interface.
+var _ WatchableLayer = (*basicLayer)(nil)
+
+// New creates a new Layer with the given Source and Document.
 // The Document is stateless and handles format parsing/serialization.
+//
+// The returned Layer also implements:
+//   - DocumentProvider: for accessing the underlying document
+//   - WatchableLayer: for file watching support
 //
 // Example:
 //
 //	src := fs.New("~/.config/app.yaml")
 //	layer := layer.New("user", src, yaml.New())
-func New(name Name, src source.Source, doc document.Document) *FileLayer {
-	return &FileLayer{
+func New(name Name, src source.Source, doc document.Document) Layer {
+	return &basicLayer{
 		name:   name,
 		source: src,
 		doc:    doc,
@@ -75,12 +89,12 @@ func New(name Name, src source.Source, doc document.Document) *FileLayer {
 }
 
 // Name returns the layer's name.
-func (l *FileLayer) Name() Name {
+func (l *basicLayer) Name() Name {
 	return l.name
 }
 
 // Load reads from the source via Document.Get and returns data as map[string]any.
-func (l *FileLayer) Load(ctx context.Context) (map[string]any, error) {
+func (l *basicLayer) Load(ctx context.Context) (map[string]any, error) {
 	data, err := l.source.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -92,29 +106,73 @@ func (l *FileLayer) Load(ctx context.Context) (map[string]any, error) {
 // Uses optimistic locking to detect external modifications.
 // Returns source.ErrSaveNotSupported if the source doesn't support saving.
 // Returns source.ErrSourceModified if the source was modified externally.
-func (l *FileLayer) Save(ctx context.Context, changeset document.JSONPatchSet) error {
+func (l *basicLayer) Save(ctx context.Context, changeset document.JSONPatchSet) error {
 	return l.source.Save(ctx, func(current []byte) ([]byte, error) {
 		return l.doc.Apply(current, changeset)
 	})
 }
 
-// Source returns the underlying source (useful for accessing source-specific methods).
-func (l *FileLayer) Source() source.Source {
-	return l.source
+// FillDetails populates the Details struct with metadata from this layer.
+// It sets the source type, document format, watcher type, and delegates to the
+// underlying source if it implements types.DetailsFiller for additional details.
+func (l *basicLayer) FillDetails(d *types.Details) {
+	// Set source type from source
+	d.Source = l.source.Type()
+
+	// Set format from document
+	d.Format = l.doc.Format()
+
+	// Set watcher type
+	if ws, ok := l.source.(source.WatchableSource); ok {
+		// Source provides its own watcher
+		w, err := ws.Watch()
+		if err == nil {
+			d.Watcher = w.Type()
+		}
+	} else {
+		// Fallback to polling
+		d.Watcher = watcher.TypePolling
+	}
+
+	// Delegate to source if it implements DetailsFiller
+	if df, ok := l.source.(types.DetailsFiller); ok {
+		df.FillDetails(d)
+	}
 }
 
 // Document returns the underlying document.
-func (l *FileLayer) Document() document.Document {
+func (l *basicLayer) Document() document.Document {
 	return l.doc
 }
 
 // CanSave returns true if this layer supports saving.
 // The source must support saving for this to return true.
-func (l *FileLayer) CanSave() bool {
+func (l *basicLayer) CanSave() bool {
 	return l.source.CanSave()
 }
 
-// Format returns the document format (e.g., "yaml", "toml", "json").
-func (l *FileLayer) Format() document.DocumentFormat {
-	return l.doc.Format()
+// Watch implements the WatchableLayer interface.
+// Returns a LayerWatcher that transforms source data into map[string]any.
+//
+// If the underlying source implements WatchableSource, its watcher is used.
+// Otherwise, a fallback polling watcher is created using the source's Load method.
+func (l *basicLayer) Watch(opts ...WatchOption) (LayerWatcher, error) {
+	var options watchOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	// Try to use source's native watcher if available
+	if ws, ok := l.source.(source.WatchableSource); ok {
+		w, err := ws.Watch()
+		if err != nil {
+			return nil, err
+		}
+		return newLayerWatcher(w, l.doc, options.configOpts), nil
+	}
+
+	// Fallback to polling using the source's Load method
+	handler := newFallbackPollHandler(l.source)
+	w := watcher.NewPolling(handler)
+	return newLayerWatcher(w, l.doc, options.configOpts), nil
 }

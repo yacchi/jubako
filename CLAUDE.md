@@ -320,6 +320,62 @@ store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.New()))
 store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 ```
 
+### Hot Reload
+
+```go
+import "github.com/yacchi/jubako/watcher"
+
+// Start watching for changes
+stop, err := store.Watch(ctx, jubako.StoreWatchConfig{
+    DebounceDelay: 100 * time.Millisecond,
+    WatcherOpts: []watcher.WatchConfigOption{
+        watcher.WithPollInterval(30 * time.Second),
+    },
+    OnError: func(name layer.Name, err error) {
+        log.Printf("Watch error for %s: %v", name, err)
+    },
+    OnReload: func() {
+        log.Println("Configuration reloaded")
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer stop(context.Background())
+
+// Subscribe to changes (called on every reload)
+unsubscribe := store.Subscribe(func(cfg AppConfig) {
+    log.Printf("Config changed: %+v", cfg)
+})
+defer unsubscribe()
+
+// Disable watching for specific layers
+store.Add(
+    layer.New("defaults", bytes.FromString(defaultsYAML), yaml.New()),
+    jubako.WithNoWatch(), // Static defaults don't need watching
+)
+
+// Note: Store.Watch currently applies the same WatcherOpts to all watched layers.
+// If you need per-layer watch behavior, wire watchers manually via layer.WatchableLayer.
+```
+
+### Remote Sources (AWS S3, SSM)
+
+```go
+import "github.com/yacchi/jubako/source/aws"
+
+// Shared AWS configuration (optional)
+cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-west-2"))
+
+// S3 source - uses ETag for efficient change detection
+s3src := aws.NewS3Source("my-bucket", "config/app.yaml", aws.WithAWSConfig(cfg))
+store.Add(layer.New("s3-config", s3src, yaml.New()))
+
+// SSM Parameter Store source - uses version for change detection
+ssmsrc := aws.NewSSMSource("/app/config", aws.WithDecryption(true), aws.WithAWSConfig(cfg))
+store.Add(layer.New("ssm-config", ssmsrc, yaml.New()))
+```
+
 ## Implementation Status
 
 ### Phase 1: Core Foundation ✅ Complete
@@ -339,7 +395,7 @@ store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 ### Phase 3: Layer Management ✅ Complete
 
 - [x] Layer interface (`Layer`)
-- [x] `FileLayer` layer implementation
+- [x] Basic layer implementation (via `layer.New()`)
 - [x] Source interface and implementations (`bytes`, `fs`)
 - [x] Document interface
 - [x] Origin tracking (`ResolvedValue`, `LayerInfo`)
@@ -354,10 +410,19 @@ store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
 - [x] JSONC support (`tailscale/hujson`)
 - [ ] Flag integration helpers
 
-### Phase 5: Advanced Features ⏳ Planned
+### Phase 5: Hot Reload & Remote Sources ✅ Complete
 
-- [ ] Hot reload with file watching
-- [ ] Remote config sources (interface)
+- [x] Hot reload with file watching (fsnotify)
+- [x] Watcher abstraction (Polling/Subscription/Noop)
+- [x] Store.Watch() with debouncing
+- [x] Layer-level watch configuration override
+- [x] AWS sources (`source/aws`) with shared configuration
+  - S3Source with ETag-based polling
+  - SSMSource with version-based polling
+
+### Phase 6: Advanced Features ⏳ Planned
+
+- [ ] Flag integration helpers
 - [ ] Validation hooks
 - [ ] Schema generation
 - [ ] Configurable merge strategies via struct tags
@@ -400,14 +465,27 @@ jubako/
 │   └── yaml/              # YAML (gopkg.in/yaml.v3)
 │
 ├── source/                # Source abstraction
-│   ├── source.go          # Source interface
-│   ├── bytes/             # Byte slice source
+│   ├── source.go          # Source interface, WatchableSource
+│   ├── bytes/             # Byte slice source (NoopWatcher)
 │   │   └── source.go
-│   └── fs/                # File system source
-│       └── source.go
+│   ├── fs/                # File system source (fsnotify)
+│   │   └── source.go
+│   └── aws/               # AWS sources (S3, SSM) [submodule]
+│       ├── go.mod
+│       ├── config.go      # Shared AWS configuration (WithAWSConfig)
+│       ├── s3.go          # S3Source (ETag-based polling)
+│       └── ssm.go         # SSMSource (Version-based polling)
+│
+├── watcher/               # Watcher abstraction
+│   ├── types.go           # WatchConfig, WatchResult, NotifyFunc
+│   ├── watcher.go         # Watcher interface
+│   ├── polling.go         # PollingWatcher
+│   ├── subscription.go    # SubscriptionWatcher
+│   └── noop.go            # NoopWatcher
 │
 └── layer/                 # Layer implementations
-    ├── layer.go           # Layer, FileLayer
+    ├── layer.go           # Layer interface, basicLayer, Provider interfaces
+    ├── watcher.go         # LayerWatcher, WatchableLayer
     ├── mapdata/           # In-memory map layer (tests/programmatic)
     └── env/               # Environment variable layer
         ├── env.go
@@ -481,12 +559,16 @@ jktest.NewLayerTester(t, factory,
 
 ## Dependencies
 
-### Optional Dependencies (Phase 4+)
+### Core Dependencies
 
-- `gopkg.in/yaml.v3` - YAML support
-- `github.com/pelletier/go-toml/v2` - TOML support
-- `github.com/tailscale/hujson` - JSONC support
-- `github.com/fsnotify/fsnotify` - File watching (Phase 5)
+- `github.com/fsnotify/fsnotify` - File watching for hot reload
+
+### Optional Dependencies (Submodules)
+
+- `gopkg.in/yaml.v3` - YAML support (`format/yaml`)
+- `github.com/pelletier/go-toml/v2` - TOML support (`format/toml`)
+- `github.com/tailscale/hujson` - JSONC support (`format/jsonc`)
+- `github.com/aws/aws-sdk-go-v2` - AWS S3 and SSM sources (`source/aws`)
 
 ## Design Decisions Log
 

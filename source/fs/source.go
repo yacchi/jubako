@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 type lockFile interface {
@@ -76,6 +79,9 @@ type Source struct {
 
 // Ensure Source implements the source.Source interface.
 var _ source.Source = (*Source)(nil)
+
+// Ensure Source implements the source.WatchableSource interface.
+var _ source.WatchableSource = (*Source)(nil)
 
 // Option configures a Source.
 type Option func(*Source)
@@ -268,9 +274,15 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 	return nil
 }
 
-// Path returns the primary file path for this source.
-func (s *Source) Path() string {
-	return s.path
+// Type returns the source type identifier.
+func (s *Source) Type() source.SourceType {
+	return source.TypeFS
+}
+
+// FillDetails implements types.DetailsFiller.
+// It populates the Details struct with the file path.
+func (s *Source) FillDetails(d *types.Details) {
+	d.Path = s.path
 }
 
 // ResolvedPath returns the actual file path being used after resolution.
@@ -344,4 +356,64 @@ func expandTilde(path string) (string, error) {
 
 	// "~something" - not a valid home expansion, return as-is
 	return path, nil
+}
+
+// Subscribe implements the watcher.SubscriptionHandler interface.
+// It sets up fsnotify-based file watching and calls notify when the file changes.
+func (s *Source) Subscribe(ctx context.Context, notify watcher.NotifyFunc) (watcher.StopFunc, error) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fsnotify watcher: %w", err)
+	}
+
+	path := s.ResolvedPath()
+
+	// Watch the directory containing the file rather than the file itself.
+	// This handles atomic writes (temp file + rename) and file recreation.
+	dir := filepath.Dir(path)
+	if err := w.Add(dir); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("failed to watch directory %q: %w", dir, err)
+	}
+
+	filename := filepath.Base(path)
+
+	go func() {
+		for {
+			select {
+			case event, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				// Only process events for our specific file
+				if filepath.Base(event.Name) != filename {
+					continue
+				}
+				// Handle write, create, and rename events
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
+					data, err := s.Load(ctx)
+					notify(data, err)
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				notify(nil, err)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	stop := func(ctx context.Context) error {
+		return w.Close()
+	}
+
+	return stop, nil
+}
+
+// Watch implements the source.WatchableSource interface.
+// Returns a SubscriptionWatcher that uses fsnotify for event-based file watching.
+func (s *Source) Watch() (watcher.Watcher, error) {
+	return watcher.NewSubscription(watcher.SubscriptionHandlerFunc(s.Subscribe)), nil
 }

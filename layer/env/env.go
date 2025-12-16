@@ -11,6 +11,8 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // TransformFunc transforms environment variable keys and values to JSON Pointer paths.
@@ -149,7 +151,10 @@ type Layer struct {
 	transform TransformFunc
 }
 
-// Ensure Layer implements layer.Layer interface.
+// TypeEnv is the source type identifier for environment variable layers.
+const TypeEnv types.SourceType = "env"
+
+// Ensure Layer implements layer.Layer interface (which includes types.DetailsFiller).
 var _ layer.Layer = (*Layer)(nil)
 
 // New creates a new environment variable layer.
@@ -253,4 +258,18 @@ func (l *Layer) Save(ctx context.Context, changeset document.JSONPatchSet) error
 // CanSave returns false because environment variable layers are read-only.
 func (l *Layer) CanSave() bool {
 	return false
+}
+
+// FormatEnv is the document format identifier for environment variable layers.
+// Environment variables don't have a traditional document format like YAML or JSON,
+// but this identifier makes it clear the data comes from environment variables.
+const FormatEnv types.DocumentFormat = "env"
+
+// FillDetails populates the Details struct with metadata from this layer.
+// Environment variable layers use a noop watcher since environment variables
+// are read once at startup.
+func (l *Layer) FillDetails(d *types.Details) {
+	d.Source = TypeEnv
+	d.Format = FormatEnv
+	d.Watcher = watcher.TypeNoop
 }

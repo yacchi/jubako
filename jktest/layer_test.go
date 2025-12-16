@@ -12,6 +12,7 @@ import (
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/layer/mapdata"
 	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/types"
 )
 
 func TestLayerTester_MapData_Compliance(t *testing.T) {
@@ -35,7 +36,8 @@ type readOnlyLayer struct {
 	data map[string]any
 }
 
-func (l *readOnlyLayer) Name() layer.Name { return "test" }
+func (l *readOnlyLayer) Name() layer.Name             { return "test" }
+func (l *readOnlyLayer) FillDetails(d *types.Details) {}
 func (l *readOnlyLayer) Load(ctx context.Context) (map[string]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -188,6 +190,7 @@ func TestDocumentLayerFactory_Success(t *testing.T) {
 
 type errUpdateSource struct{}
 
+func (s *errUpdateSource) Type() source.SourceType               { return "error" }
 func (s *errUpdateSource) Load(_ context.Context) ([]byte, error) {
 	return nil, errors.New("load error")
 }

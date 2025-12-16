@@ -7,7 +7,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/yacchi/jubako/types"
 )
 
 func TestExpandTilde(t *testing.T) {
@@ -50,8 +54,10 @@ func TestResolvePathAndResolvedPath(t *testing.T) {
 	}
 
 	s := New(primary, WithSearchPaths(alt))
-	if got := s.Path(); got != primary {
-		t.Fatalf("Path() = %q, want %q", got, primary)
+	details := &types.Details{}
+	s.FillDetails(details)
+	if details.Path != primary {
+		t.Fatalf("FillDetails().Path = %q, want %q", details.Path, primary)
 	}
 	if !s.CanSave() {
 		t.Fatal("CanSave() = false, want true")
@@ -196,5 +202,90 @@ func TestSave_CreateTempFailure(t *testing.T) {
 	s := New(target)
 	if err := s.Save(context.Background(), func(b []byte) ([]byte, error) { return b, nil }); err == nil {
 		t.Fatal("Save() expected error, got nil")
+	}
+}
+
+// TestSource_Watch verifies fs.Source returns a valid subscription watcher.
+// Basic watcher tests are covered by jktest.SourceTester compliance tests.
+func TestSource_Watch(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(target, []byte(`{"key": "initial"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	s := New(target)
+	w, err := s.Watch()
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	if w == nil {
+		t.Fatal("Watch() returned nil watcher")
+	}
+
+	// Verify it's a subscription watcher (fs-specific)
+	if w.Type() != "subscription" {
+		t.Errorf("Watch().Type() = %q, want %q", w.Type(), "subscription")
+	}
+}
+
+func TestSource_Subscribe(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(target, []byte(`{"key": "initial"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	s := New(target)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var received []byte
+	var mu sync.Mutex
+	notify := func(data []byte, err error) {
+		mu.Lock()
+		received = data
+		mu.Unlock()
+	}
+
+	stop, err := s.Subscribe(ctx, notify)
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	defer stop(context.Background())
+
+	// Write to file to trigger notification
+	time.Sleep(50 * time.Millisecond) // Wait for watcher to be ready
+	if err := os.WriteFile(target, []byte(`{"key": "updated"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	// Wait for notification
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		data := received
+		mu.Unlock()
+		if data != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mu.Lock()
+	if received == nil {
+		t.Error("expected notification, got none")
+	}
+	mu.Unlock()
+}
+
+func TestSource_Subscribe_DirectoryNotFound(t *testing.T) {
+	s := New("/nonexistent/dir/config.json")
+
+	ctx := context.Background()
+	_, err := s.Subscribe(ctx, func(data []byte, err error) {})
+	if err == nil {
+		t.Error("Subscribe() expected error for nonexistent directory, got nil")
 	}
 }

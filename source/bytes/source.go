@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // Source loads raw configuration data from a byte slice.
@@ -16,6 +17,9 @@ type Source struct {
 
 // Ensure Source implements the source.Source interface.
 var _ source.Source = (*Source)(nil)
+
+// Ensure Source implements the source.WatchableSource interface.
+var _ source.WatchableSource = (*Source)(nil)
 
 // New creates a source from raw bytes.
 //
@@ -37,6 +41,11 @@ func New(data []byte) *Source {
 //	src := bytes.FromString("server:\n  port: 8080")
 func FromString(data string) *Source {
 	return New([]byte(data))
+}
+
+// Type returns the source type identifier.
+func (s *Source) Type() source.SourceType {
+	return source.TypeBytes
 }
 
 // Load implements the source.Source interface.
@@ -62,4 +71,10 @@ func (s *Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error {
 // CanSave returns false because byte slice sources do not support saving.
 func (s *Source) CanSave() bool {
 	return false
+}
+
+// Watch implements the source.WatchableSource interface.
+// Returns a NoopWatcher because byte slice sources are immutable and never change.
+func (s *Source) Watch() (watcher.Watcher, error) {
+	return watcher.NewNoop(), nil
 }

@@ -1,0 +1,153 @@
+// Package jktest provides testing utilities for jubako implementations.
+package jktest
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/watcher"
+)
+
+// SourceFactory creates a Source initialized with the given test data.
+// The factory is called for each test case to ensure test isolation.
+type SourceFactory func(data []byte) source.Source
+
+// SourceTesterOption configures SourceTester behavior.
+type SourceTesterOption func(*SourceTester)
+
+// SourceTester provides utilities to verify Source implementations.
+type SourceTester struct {
+	t       *testing.T
+	factory SourceFactory
+}
+
+// NewSourceTester creates a SourceTester for the given SourceFactory.
+// The factory will be used to create new Source instances for each test.
+func NewSourceTester(t *testing.T, factory SourceFactory, opts ...SourceTesterOption) *SourceTester {
+	st := &SourceTester{
+		t:       t,
+		factory: factory,
+	}
+	for _, opt := range opts {
+		opt(st)
+	}
+	return st
+}
+
+// TestAll runs all standard compliance tests for Source implementations.
+func (st *SourceTester) TestAll() {
+	st.t.Run("Type", st.testType)
+	st.t.Run("Load", st.testLoad)
+	st.t.Run("CanSave", st.testCanSave)
+	st.t.Run("Watch", st.testWatch)
+}
+
+// testType verifies Type() returns a non-empty SourceType.
+func (st *SourceTester) testType(t *testing.T) {
+	s := st.factory([]byte(`{"key": "value"}`))
+
+	typ := s.Type()
+	require(t, typ != "", "Type() returned empty string")
+}
+
+// testLoad verifies Load() returns the correct data.
+func (st *SourceTester) testLoad(t *testing.T) {
+	testData := []byte(`{"key": "value"}`)
+	s := st.factory(testData)
+
+	data, err := s.Load(context.Background())
+	requireNoError(t, err, "Load error = %v", err)
+	require(t, len(data) > 0, "Load returned empty data")
+}
+
+// testCanSave verifies CanSave() is consistent with Save() behavior.
+func (st *SourceTester) testCanSave(t *testing.T) {
+	s := st.factory([]byte(`{"key": "value"}`))
+
+	canSave := s.CanSave()
+	err := s.Save(context.Background(), func(current []byte) ([]byte, error) {
+		return []byte(`{"key": "new_value"}`), nil
+	})
+
+	if canSave {
+		// If CanSave() returns true, Save() should not return ErrSaveNotSupported
+		check(t, err != source.ErrSaveNotSupported,
+			"CanSave() returned true but Save() returned ErrSaveNotSupported")
+	} else {
+		// If CanSave() returns false, Save() should return ErrSaveNotSupported
+		check(t, err == source.ErrSaveNotSupported,
+			"CanSave() returned false but Save() did not return ErrSaveNotSupported, got %v", err)
+	}
+}
+
+// testWatch verifies Watch behavior for WatchableSource implementations.
+func (st *SourceTester) testWatch(t *testing.T) {
+	s := st.factory([]byte(`{"key": "value"}`))
+
+	ws, ok := s.(source.WatchableSource)
+	if !ok {
+		t.Skip("Source does not implement WatchableSource")
+		return
+	}
+
+	t.Run("WatchReturnsValidWatcher", func(t *testing.T) {
+		w, err := ws.Watch()
+		requireNoError(t, err, "Watch() error = %v", err)
+		require(t, w != nil, "Watch() returned nil watcher")
+
+		// Verify watcher type is valid
+		typ := w.Type()
+		require(t, typ != "", "Watcher.Type() returned empty string")
+		check(t, typ == watcher.TypePolling || typ == watcher.TypeSubscription || typ == watcher.TypeNoop,
+			"Watcher.Type() returned unknown type: %q", typ)
+	})
+
+	t.Run("WatchDoesNotStartUntilStartCalled", func(t *testing.T) {
+		w, err := ws.Watch()
+		requireNoError(t, err, "Watch() error = %v", err)
+
+		// Results() should return nil before Start() is called
+		results := w.Results()
+		check(t, results == nil, "Results() should return nil before Start() is called, got %v", results)
+	})
+
+	t.Run("WatchStartStop", func(t *testing.T) {
+		w, err := ws.Watch()
+		requireNoError(t, err, "Watch() error = %v", err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		cfg := watcher.NewWatchConfig(
+			watcher.WithPollInterval(100 * time.Millisecond),
+		)
+
+		err = w.Start(ctx, cfg)
+		requireNoError(t, err, "Start() error = %v", err)
+
+		// Results() should return a non-nil channel after Start()
+		results := w.Results()
+		require(t, results != nil, "Results() returned nil after Start()")
+
+		// Stop should work without error
+		err = w.Stop(context.Background())
+		requireNoError(t, err, "Stop() error = %v", err)
+	})
+
+	t.Run("WatchCanBeCalledMultipleTimes", func(t *testing.T) {
+		// Calling Watch() multiple times should not cause issues
+		w1, err := ws.Watch()
+		requireNoError(t, err, "First Watch() error = %v", err)
+		require(t, w1 != nil, "First Watch() returned nil watcher")
+
+		w2, err := ws.Watch()
+		requireNoError(t, err, "Second Watch() error = %v", err)
+		require(t, w2 != nil, "Second Watch() returned nil watcher")
+
+		// Both watchers should have valid types
+		check(t, w1.Type() != "", "First watcher Type() returned empty string")
+		check(t, w2.Type() != "", "Second watcher Type() returned empty string")
+	})
+}

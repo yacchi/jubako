@@ -11,12 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestDocument_Format(t *testing.T) {
-	doc := New()
-	if doc.Format() != document.FormatYAML {
-		t.Errorf("Format() = %v, want %v", doc.Format(), document.FormatYAML)
-	}
-}
 
 // TestDocument_Get_Invalid verifies error handling for invalid YAML.
 func TestDocument_Get_Invalid(t *testing.T) {
@@ -243,8 +237,7 @@ func TestDocument_Interface(t *testing.T) {
 
 // TestDocument_Compliance runs the standard jktest compliance tests.
 func TestDocument_Compliance(t *testing.T) {
-	factory := jktest.DocumentLayerFactory(New())
-	jktest.NewLayerTester(t, factory).TestAll()
+	jktest.NewDocumentLayerTester(t, New()).TestAll()
 }
 
 func TestGet_EmptyInput(t *testing.T) {

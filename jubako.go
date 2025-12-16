@@ -11,4 +11,5 @@
 //   - Reference-stable containers (Cell pattern)
 //   - Type-safe access with generics
 //   - Change notification via subscriptions
+//   - Hot reload via Store.Watch
 package jubako

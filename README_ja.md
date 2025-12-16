@@ -19,6 +19,7 @@
     - [カスタムデコーダー](#カスタムデコーダー)
 - [API リファレンス](#api-リファレンス)
     - [Store[T]](#storet)
+        - [ホットリロード (Watch)](#ホットリロード-watch)
     - [オリジン追跡](#オリジン追跡)
     - [レイヤー情報](#レイヤー情報)
 - [サポートされるフォーマット](#サポートされるフォーマット)
@@ -38,6 +39,7 @@
 - **フォーマット保持** - AST ベースの処理により変更箇所のみを更新（コメント・空行・インデント等を維持）
 - **型安全なアクセス** - ジェネリクスベースの API でコンパイル時の型チェック
 - **変更通知** - 設定変更をサブスクライブ可能
+- **ホットリロード** - ソース変更時に自動で再読込（`Store.Watch`）
 
 ## インストール
 
@@ -518,6 +520,41 @@ func main() {
 }
 ```
 
+#### ホットリロード (Watch)
+
+`Store.Watch` はレイヤーの変更を監視し、自動で `Reload` 相当の処理を実行した上でサブスクライバへ通知します。
+通常は、最初のスナップショットを作るために `Watch` の前に一度 `Load` しておくことを推奨します。
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct{}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	stop, err := store.Watch(ctx, jubako.DefaultStoreWatchConfig())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stop(context.Background())
+}
+```
+
+補足:
+
+- `jubako.WithNoWatch()` を指定したレイヤーは監視対象から除外されます。
+- `StoreWatchConfig.OnError` の `layer.Name` は、ストア全体のエラー（例: materialize 失敗）では空文字（`layer.Name("")`）になる場合があります。
+- `StoreWatchConfig.WatcherOpts` はポーリング監視の設定（例: `watcher.WithPollInterval`, `watcher.WithCompareFunc`）に使用します。サブスクリプション型の監視では、ポーリング固有のオプションが無視される場合があります。
+
 #### 値の変更と保存
 
 ```go
@@ -925,7 +962,8 @@ type Document interface {
 ### Layer インターフェース
 
 Layer は `map[string]any` として設定を読み込む設定ソースを表します。
-標準の実装は `layer.New(name, source, document)` で作成される `layer.FileLayer` です。
+標準の実装は `layer.New(name, source, document)` で作成します。
+返される `Layer` はオプショナルなインターフェース（`SourceProvider`、`DocumentProvider`、`FormatProvider`、`WatchableLayer`）も実装しており、基盤となるコンポーネントにアクセスできます。
 また、環境変数レイヤーのように特殊な実装も可能です：
 
 ```go

@@ -8,6 +8,8 @@ import (
 	"github.com/yacchi/jubako/jktest"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 func TestNew(t *testing.T) {
@@ -478,4 +480,21 @@ func TestLayer_Compliance(t *testing.T) {
 		jktest.SkipNullTest("environment variables cannot represent null values"),
 		jktest.SkipArrayTest("environment variables cannot represent arrays"),
 	).TestAll()
+}
+
+func TestLayer_FillDetails(t *testing.T) {
+	l := New("env", "TEST_")
+
+	var d types.Details
+	l.FillDetails(&d)
+
+	if d.Source != TypeEnv {
+		t.Errorf("Source = %q, want %q", d.Source, TypeEnv)
+	}
+	if d.Format != FormatEnv {
+		t.Errorf("Format = %q, want %q", d.Format, FormatEnv)
+	}
+	if d.Watcher != watcher.TypeNoop {
+		t.Errorf("Watcher = %q, want %q", d.Watcher, watcher.TypeNoop)
+	}
 }

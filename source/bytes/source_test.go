@@ -5,20 +5,8 @@ import (
 	"testing"
 )
 
-func TestSource_Load(t *testing.T) {
-	data := []byte("server:\n  port: 8080")
-	src := New(data)
-
-	loaded, err := src.Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if string(loaded) != string(data) {
-		t.Errorf("Load() = %q, want %q", string(loaded), string(data))
-	}
-}
-
+// TestSource_Load_ReturnsDefensiveCopy verifies that Load returns a copy of the data,
+// not a reference to the internal slice. This is a bytes.Source-specific behavior.
 func TestSource_Load_ReturnsDefensiveCopy(t *testing.T) {
 	original := []byte("original data")
 	src := New(original)
@@ -43,6 +31,7 @@ func TestSource_Load_ReturnsDefensiveCopy(t *testing.T) {
 	}
 }
 
+// TestFromString verifies the FromString convenience function.
 func TestFromString(t *testing.T) {
 	src := FromString("test data")
 
@@ -56,25 +45,7 @@ func TestFromString(t *testing.T) {
 	}
 }
 
-func TestSource_CanSave(t *testing.T) {
-	src := New([]byte("data"))
-
-	if src.CanSave() {
-		t.Error("CanSave() = true, want false")
-	}
-}
-
-func TestSource_Save_ReturnsError(t *testing.T) {
-	src := New([]byte("data"))
-
-	err := src.Save(context.Background(), func(current []byte) ([]byte, error) {
-		return []byte("new data"), nil
-	})
-	if err == nil {
-		t.Error("Save() should return an error")
-	}
-}
-
+// TestSource_Load_CancelledContext verifies context cancellation is respected.
 func TestSource_Load_CancelledContext(t *testing.T) {
 	src := New([]byte("data"))
 
@@ -86,3 +57,6 @@ func TestSource_Load_CancelledContext(t *testing.T) {
 		t.Error("Load() with cancelled context should return an error")
 	}
 }
+
+// Note: Basic Load, CanSave, Save, Type, and Watch tests are covered by
+// jktest.SourceTester compliance tests in jktest/source_test.go.

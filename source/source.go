@@ -6,6 +6,9 @@ package source
 import (
 	"context"
 	"errors"
+
+	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // ErrSaveNotSupported is returned when Save is called on a source that doesn't support saving.
@@ -14,6 +17,16 @@ var ErrSaveNotSupported = errors.New("save not supported for this source")
 // ErrSourceModified is returned when optimistic locking detects that the source
 // has been modified since the last Load. This prevents overwriting external changes.
 var ErrSourceModified = errors.New("source has been modified since last load")
+
+// SourceType is an alias for types.SourceType.
+// This allows source implementations to use source.SourceType directly.
+type SourceType = types.SourceType
+
+// Standard source types.
+const (
+	TypeFS    SourceType = "fs"
+	TypeBytes SourceType = "bytes"
+)
 
 // UpdateFunc is a function that generates new data to save.
 // It receives the current bytes from the source (captured at a safe point)
@@ -27,6 +40,10 @@ type UpdateFunc func(current []byte) ([]byte, error)
 // The Source interface is implemented by various source types (files, byte slices, env vars, etc.).
 // Sources are format-agnostic; they only handle raw bytes.
 type Source interface {
+	// Type returns the source type identifier (e.g., TypeFS, TypeBytes).
+	// This is used for introspection and debugging.
+	Type() SourceType
+
 	// Load reads the raw configuration data from the source.
 	// The context can be used for cancellation and timeouts.
 	Load(ctx context.Context) ([]byte, error)
@@ -55,4 +72,20 @@ type Source interface {
 
 	// CanSave returns true if the source supports saving.
 	CanSave() bool
+}
+
+// WatchableSource is an optional interface that sources can implement
+// to support change detection and hot reload.
+//
+// Sources can return different watcher types:
+//   - SubscriptionWatcher: for event-based sources (fsnotify, etc.)
+//   - PollingWatcher: for sources that need polling (remote APIs, etc.)
+//   - NoopWatcher: for immutable sources (bytes.Source)
+//
+// If a source doesn't implement WatchableSource, layers can fall back
+// to polling using the source's Load method.
+type WatchableSource interface {
+	// Watch returns a Watcher for this source.
+	// The watcher should not be started yet; the caller will call Start.
+	Watch() (watcher.Watcher, error)
 }
