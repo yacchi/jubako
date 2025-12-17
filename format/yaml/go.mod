@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.10
 
 require (
-	github.com/yacchi/jubako v0.2.0
+	github.com/yacchi/jubako v0.2.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
