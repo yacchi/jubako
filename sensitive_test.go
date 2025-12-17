@@ -60,7 +60,7 @@ func TestSensitiveLayerValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("normal field to sensitive layer returns error", func(t *testing.T) {
+	t.Run("normal field to sensitive layer succeeds", func(t *testing.T) {
 		store := New[sensitiveTestConfig]()
 
 		// Add a sensitive layer
@@ -74,13 +74,18 @@ func TestSensitiveLayerValidation(t *testing.T) {
 			t.Fatalf("Load error: %v", err)
 		}
 
-		// Try to write normal field to sensitive layer - should fail
+		// Write normal field to sensitive layer - should succeed
+		// This allows storing related non-sensitive data (e.g., account IDs)
+		// alongside sensitive data in secure storage locations.
 		err := store.SetTo("secrets", "/app/name", "myapp")
-		if err == nil {
-			t.Fatal("expected error when writing normal field to sensitive layer")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if !errors.Is(err, ErrNormalFieldToSensitiveLayer) {
-			t.Fatalf("expected ErrNormalFieldToSensitiveLayer, got: %v", err)
+
+		// Verify the value was set
+		config := store.Get()
+		if config.App.Name != "myapp" {
+			t.Fatalf("expected app.name=myapp, got %s", config.App.Name)
 		}
 	})
 

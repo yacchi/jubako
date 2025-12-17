@@ -7,10 +7,6 @@ var (
 	// ErrSensitiveFieldToNormalLayer is returned when attempting to write
 	// a sensitive field to a non-sensitive layer.
 	ErrSensitiveFieldToNormalLayer = errors.New("cannot write sensitive field to non-sensitive layer")
-
-	// ErrNormalFieldToSensitiveLayer is returned when attempting to write
-	// a non-sensitive field to a sensitive layer.
-	ErrNormalFieldToSensitiveLayer = errors.New("cannot write non-sensitive field to sensitive layer")
 )
 
 // SensitiveMaskFunc is a function that masks sensitive values.
@@ -31,15 +27,15 @@ const DefaultMaskString = "********"
 // validateSensitivity checks if writing to the given path in a layer is allowed.
 // Returns an error if:
 // - The path is sensitive but the layer is not sensitive (ErrSensitiveFieldToNormalLayer)
-// - The path is not sensitive but the layer is sensitive (ErrNormalFieldToSensitiveLayer)
+//
+// Note: Non-sensitive fields CAN be written to sensitive layers. This allows storing
+// related but non-sensitive data (e.g., account IDs) alongside sensitive data in
+// secure storage locations.
 func validateSensitivity(table *MappingTable, path string, layerSensitive bool) error {
 	fieldSensitive := table.IsSensitive(path)
 
 	if fieldSensitive && !layerSensitive {
 		return ErrSensitiveFieldToNormalLayer
-	}
-	if !fieldSensitive && layerSensitive {
-		return ErrNormalFieldToSensitiveLayer
 	}
 	return nil
 }
