@@ -1,4 +1,5 @@
-.PHONY: build test lint clean fmt vet examples readme-extract readme-examples check-examples setup prepare check-release check-ci tidy ci-test ci-lint ci-release version update-version verify-version check-tags release-tag release
+.PHONY: build test lint clean fmt vet examples readme-extract readme-examples check-examples setup prepare check-release check-ci tidy ci-test ci-lint ci-release version update-version verify-version check-tags release-tag release help all
+all: help
 
 GOCACHE ?= $(CURDIR)/.gocache
 export GOCACHE
@@ -25,8 +26,8 @@ done)
 # Dependent modules (modules that depend on root, i.e., ALL_MODULES excluding root ".")
 DEP_MODULES := $(filter-out .,$(ALL_MODULES))
 
-# Setup go.work for local development (required before build/test)
 # Note: Use 'make prepare' for idempotent setup (CI and local)
+## Setup go.work for local development (required before build/test)
 setup:
 	@if [ ! -f go.work ]; then \
 		echo "Creating go.work..."; \
@@ -39,14 +40,14 @@ setup:
 		echo "go.work already exists."; \
 	fi
 
-# Show current version
+## Show current version
 version:
 	@echo $(VERSION)
 
-# Prepare development environment (idempotent, safe to run multiple times)
 # - Creates/updates go.work with all modules and replace directives
 # - Replace directives redirect versioned dependencies to local paths
 # Use this in CI and before local development
+## Prepare development environment (idempotent, safe to run multiple times)
 prepare:
 	@echo "Preparing development environment (version: $(VERSION))..."
 	@echo "go 1.24.0" > go.work
@@ -66,8 +67,8 @@ prepare:
 	@echo "go.work created:"
 	@cat go.work
 
-# Update all go.mod files to use VERSION from version.txt
 # Dynamically updates all module references based on BASE_MODULE and ALL_MODULES
+## Update all go.mod files to use VERSION from version.txt
 update-version:
 	@echo "Updating all modules to $(VERSION)..."
 	@for mod in $(DEP_MODULES); do \
@@ -79,8 +80,8 @@ update-version:
 	done
 	@echo "All modules updated to $(VERSION)"
 
-# Verify go.mod versions match version.txt (used by CI)
 # Checks that all dependent modules reference BASE_MODULE at VERSION
+## Verify go.mod versions match version.txt (used by CI)
 verify-version:
 	@echo "Verifying go.mod versions match $(VERSION)..."
 	@errors=0; \
@@ -115,7 +116,7 @@ check-tags:
 	done
 	@echo "No existing tags for $(VERSION)"
 
-# Create release tags for all modules (does not push)
+## Create release tags for all modules (does not push)
 release-tag: check-tags
 	@echo "Creating release tags for $(VERSION)..."
 	@git tag $(VERSION)
@@ -128,21 +129,21 @@ release-tag: check-tags
 	done
 	@echo "All tags created. Push with: git push --tags"
 
-# Full release process (verify + tag + push tags)
+## Full release process (verify + tag + push tags)
 release: verify-version release-tag
 	@echo "Pushing tags..."
 	@git push --tags
 	@echo "Release $(VERSION) complete!"
 
-# Build
+## Build
 build:
 	go build ./...
 
-# Run examples (verify they compile and execute)
+## Run examples (verify they compile and execute)
 examples:
 	@echo "Running examples..."
 	@for dir in examples/*/; do \
-		if [ "$$(basename $$dir)" != ".readme" ]; then \
+		if [ "$$$(basename $$dir)" != ".readme" ]; then \
 			echo "  Running $$dir..."; \
 			go run "./$$dir" || exit 1; \
 		fi; \
@@ -153,8 +154,8 @@ examples:
 readme-extract:
 	@go run ./scripts/extract-readme
 
-# Run extracted README examples
 # Creates stub config files that some README examples expect
+## Run extracted README examples
 readme-examples: readme-extract
 	@echo "Running README examples..."
 	@mkdir -p ~/.config/app
@@ -172,18 +173,18 @@ readme-examples: readme-extract
 		echo "No README examples to run."; \
 	fi
 
-# Combined check: existing examples + README examples
+## Combined check: existing examples + README examples
 check-examples: examples readme-examples
 	@echo "All examples verified."
 
-# Test all modules
+## Test all modules
 test:
 	@for mod in $(SUBMODULES); do \
 		echo "Testing $$mod..."; \
 		(cd $$mod && go test -v -race ./...) || exit 1; \
 	done
 
-# Test with coverage (all modules combined)
+## Test with coverage (all modules combined)
 test-cover:
 	@echo "mode: atomic" > coverage.out
 	@for mod in $(SUBMODULES); do \
@@ -196,34 +197,34 @@ test-cover:
 	done
 	go tool cover -html=coverage.out -o coverage.html
 
-# Lint
+## Lint
 lint: vet
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found" && exit 1)
 	golangci-lint run
 
-# Vet
+## Vet
 vet:
 	go vet ./...
 
-# Format
+## Format
 fmt:
 	go fmt ./...
 
-# Clean
+## Clean
 clean:
 	rm -f coverage.out coverage.html
 
-# Tidy dependencies for all modules
+## Tidy dependencies for all modules
 tidy:
 	@for mod in $(ALL_MODULES); do \
 		echo "Tidying $$mod..."; \
 		(cd $$mod && go mod tidy) || exit 1; \
 	done
 
-# Check for release readiness
 # - No replace directives in any go.mod files
 # - All go.mod files use VERSION from version.txt
 # - No v0.0.0 dependencies
+## Check for release readiness
 check-release:
 	@echo "Checking release readiness (version: $(VERSION))..."
 	@errors=0; \
@@ -286,8 +287,8 @@ ci-lint:
 		(cd $$mod && go vet ./...) || exit 1; \
 	done
 
-# CI release task - complete release process for CI
 # Skips if tag already exists, otherwise: verify + tag + push
+# CI release task - complete release process for CI
 ci-release:
 	@echo "CI Release for $(VERSION)..."
 	@if git rev-parse "$(VERSION)" >/dev/null 2>&1; then \
@@ -299,3 +300,6 @@ ci-release:
 	@echo "Pushing tags..."
 	@git push --tags
 	@echo "Release $(VERSION) complete!"
+
+help: ## Show help
+	@go run ./scripts/help
