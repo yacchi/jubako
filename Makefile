@@ -1,4 +1,4 @@
-.PHONY: build test lint clean fmt vet examples setup check-release check-ci tidy
+.PHONY: build test lint clean fmt vet examples setup prepare check-release check-ci tidy ci-test ci-lint
 
 GOCACHE ?= $(CURDIR)/.gocache
 export GOCACHE
@@ -19,6 +19,7 @@ done)
 DEP_MODULES := $(filter-out .,$(ALL_MODULES))
 
 # Setup go.work for local development (required before build/test)
+# Note: Use 'make prepare' for idempotent setup (CI and local)
 setup:
 	@if [ ! -f go.work ]; then \
 		echo "Creating go.work..."; \
@@ -30,6 +31,29 @@ setup:
 	else \
 		echo "go.work already exists."; \
 	fi
+
+# Prepare development environment (idempotent, safe to run multiple times)
+# - Creates/updates go.work with all modules and replace directives
+# - Replace directives are needed because v0.0.0 isn't published yet
+# Use this in CI and before local development
+prepare:
+	@echo "Preparing development environment..."
+	@echo "go 1.24" > go.work
+	@echo "" >> go.work
+	@echo "use (" >> go.work
+	@for mod in $(ALL_MODULES); do \
+		echo "	$$mod" >> go.work; \
+	done
+	@echo ")" >> go.work
+	@echo "" >> go.work
+	@echo "replace (" >> go.work
+	@for mod in $(ALL_MODULES); do \
+		modpath=$$(head -1 "$$mod/go.mod" | sed 's/^module //'); \
+		echo "	$$modpath v0.0.0 => $$mod" >> go.work; \
+	done
+	@echo ")" >> go.work
+	@echo "go.work created:"
+	@cat go.work
 
 # Build
 build:
@@ -129,3 +153,23 @@ check-ci:
 		echo "CI checks failed. Remove replace directives and use go.work for local development."; \
 		exit 1; \
 	fi
+
+# CI test task - run tests with coverage for all modules
+ci-test:
+	@echo "mode: atomic" > coverage.txt
+	@for mod in $(SUBMODULES); do \
+		echo "Testing $$mod with coverage..."; \
+		(cd $$mod && go test -race -coverprofile=coverage.tmp -covermode=atomic ./...) || exit 1; \
+		if [ -f "$$mod/coverage.tmp" ]; then \
+			tail -n +2 "$$mod/coverage.tmp" >> coverage.txt; \
+			rm -f "$$mod/coverage.tmp"; \
+		fi; \
+	done
+	@echo "Coverage report: coverage.txt"
+
+# CI lint task - run go vet for all modules
+ci-lint:
+	@for mod in $(SUBMODULES); do \
+		echo "Vetting $$mod..."; \
+		(cd $$mod && go vet ./...) || exit 1; \
+	done
