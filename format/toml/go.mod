@@ -6,5 +6,5 @@ toolchain go1.24.10
 
 require (
 	github.com/pelletier/go-toml/v2 v2.2.4
-	github.com/yacchi/jubako v0.1.0
+	github.com/yacchi/jubako v0.2.0
 )
