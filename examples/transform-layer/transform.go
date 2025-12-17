@@ -7,6 +7,7 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/types"
 )
 
 // PathMapping defines a bidirectional path transformation.
@@ -73,6 +74,16 @@ func (t *TransformLayer) Save(ctx context.Context, changeset document.JSONPatchS
 
 func (t *TransformLayer) CanSave() bool {
 	return t.inner.CanSave()
+}
+
+// FillDetails delegates to the inner layer's FillDetails method.
+func (t *TransformLayer) FillDetails(d *types.Details) {
+	t.inner.FillDetails(d)
+}
+
+// Watch delegates to the inner layer's Watch method.
+func (t *TransformLayer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return t.inner.Watch(opts...)
 }
 
 // transformToCanonical transforms a map from source format to canonical format.
