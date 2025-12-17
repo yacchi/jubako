@@ -673,6 +673,48 @@ type AppConfig struct {
   - Current config implementation: `internal/config/`
   - Will migrate to use jubako once stable
 
+## Release Process
+
+### Manual Release Steps
+
+1. **Update version.txt** with the new version number (e.g., `0.2.1`)
+2. **Run version update**: `make update-version` - Updates all submodule go.mod files
+3. **Commit the version bump**:
+   ```bash
+   git add version.txt examples/go.mod format/*/go.mod source/aws/go.mod
+   git commit -m "chore(release): bump version to vX.Y.Z"
+   ```
+4. **Run release**: `make release` - Creates tags and pushes them
+5. **Push commits**: `git push origin main`
+
+### Automated Release (CI)
+
+When `version.txt` is pushed to main, the CI workflow automatically:
+1. Creates release tags for all modules
+2. Creates a GitHub Release with auto-generated release notes
+
+### Makefile Commands
+
+| Command | Description |
+|---------|-------------|
+| `make version` | Show current version |
+| `make update-version` | Update all go.mod files to use version from version.txt |
+| `make verify-version` | Verify all go.mod versions match version.txt |
+| `make release-tag` | Create release tags (does not push) |
+| `make release` | Full release: verify + tag + push |
+| `make check-release` | Check release readiness |
+
+### Tag Structure
+
+For version `vX.Y.Z`, the following tags are created:
+- `vX.Y.Z` (root module)
+- `examples/vX.Y.Z`
+- `format/jsonc/vX.Y.Z`
+- `format/toml/vX.Y.Z`
+- `format/yaml/vX.Y.Z`
+- `scripts/vX.Y.Z`
+- `source/aws/vX.Y.Z`
+
 ## Notes for AI Assistants
 
 When working on this library:
