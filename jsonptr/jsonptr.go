@@ -108,3 +108,41 @@ func Parse(pointer string) ([]string, error) {
 
 	return keys, nil
 }
+
+// Join combines two JSON Pointer paths into one.
+// The second path can be either relative (without leading "/") or absolute (with leading "/").
+// In both cases, it is appended to the first path.
+//
+// Examples:
+//
+//	Join("/server", "port")       -> "/server/port"
+//	Join("/server", "/port")      -> "/server/port"
+//	Join("", "port")              -> "/port"
+//	Join("/server", "")           -> "/server"
+//	Join("/a", "/b/c")            -> "/a/b/c"
+func Join(base, path string) string {
+	// Handle empty cases
+	if path == "" {
+		if base == "" {
+			return ""
+		}
+		return base
+	}
+
+	// Normalize path: remove leading "/" if present
+	if strings.HasPrefix(path, "/") {
+		path = path[1:]
+	}
+
+	// Handle empty base
+	if base == "" {
+		return "/" + path
+	}
+
+	// Ensure base starts with "/"
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+
+	return base + "/" + path
+}

@@ -816,8 +816,89 @@ func main() {
 }
 ```
 
-Note: `Save`/`SaveLayer` only writes layers with pending changes (set via `SetTo`).
+Note: `Save`/`SaveLayer` only writes layers with pending changes (set via `SetTo` or `Set`).
 This avoids rewriting unchanged documents, which could otherwise re-serialize and lose formatting/comments depending on the format.
+
+#### Bulk Set with Functional Options
+
+The `Set` method provides a flexible way to set multiple values at once using functional options:
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct {
+	Server struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	} `json:"server"`
+}
+
+type Credential struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	// Set multiple values with type-safe helpers
+	err := store.Set("user",
+		jubako.String("/server/host", "localhost"),
+		jubako.Int("/server/port", 8080),
+	)
+
+	// Use Path for grouping under a common prefix
+	err = store.Set("user", jubako.Path("/server",
+		jubako.String("host", "localhost"),
+		jubako.Int("port", 8080),
+	))
+
+	// Expand a struct into multiple path-value pairs
+	cred := Credential{Username: "admin", Password: "secret"}
+	err = store.Set("user",
+		jubako.Struct("/credential", cred),
+		jubako.SkipZeroValues(), // Skip fields with zero values
+	)
+
+	// Use Map to set multiple values from a map
+	err = store.Set("user", jubako.Map("/settings", map[string]any{
+		"timeout": 30,
+		"retries": 3,
+	}))
+
+	// Delete values by setting nil with DeleteNilValue option
+	err = store.Set("user",
+		jubako.Value("/old_field", nil),
+		jubako.DeleteNilValue(),
+	)
+
+	_ = ctx
+	_ = err
+}
+```
+
+**Available SetOption functions:**
+
+| Function | Description |
+|----------|-------------|
+| `String(path, value)` | Set a string value |
+| `Int(path, value)` | Set an integer value |
+| `Int64(path, value)` | Set an int64 value |
+| `Float(path, value)` | Set a float64 value |
+| `Bool(path, value)` | Set a boolean value |
+| `Value(path, value)` | Set any value |
+| `Struct(path, v)` | Expand struct fields into path-value pairs |
+| `Map(path, m)` | Expand map entries into path-value pairs |
+| `Path(prefix, opts...)` | Group options under a common path prefix |
+| `SkipZeroValues()` | Skip entries with zero values |
+| `DeleteNilValue()` | Treat nil values as delete operations |
 
 ### Origin Tracking
 

@@ -777,8 +777,89 @@ func main() {
 }
 ```
 
-注: `Save`/`SaveLayer` は `SetTo` によって変更が入ったレイヤーのみを書き込みます。
+注: `Save`/`SaveLayer` は `SetTo` や `Set` によって変更が入ったレイヤーのみを書き込みます。
 変更がないドキュメントを不用意に再生成してしまうと、フォーマット/コメントが失われる可能性があるためです。
+
+#### 関数オプションによる一括設定
+
+`Set` メソッドは関数オプションを使用して複数の値を一度に設定できる柔軟な方法を提供します：
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/yacchi/jubako"
+)
+
+type AppConfig struct {
+	Server struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	} `json:"server"`
+}
+
+type Credential struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[AppConfig]()
+
+	// 型安全なヘルパーで複数の値を設定
+	err := store.Set("user",
+		jubako.String("/server/host", "localhost"),
+		jubako.Int("/server/port", 8080),
+	)
+
+	// Path で共通プレフィックス配下にグループ化
+	err = store.Set("user", jubako.Path("/server",
+		jubako.String("host", "localhost"),
+		jubako.Int("port", 8080),
+	))
+
+	// 構造体を複数のパス・値ペアに展開
+	cred := Credential{Username: "admin", Password: "secret"}
+	err = store.Set("user",
+		jubako.Struct("/credential", cred),
+		jubako.SkipZeroValues(), // ゼロ値のフィールドをスキップ
+	)
+
+	// Map で map から複数の値を設定
+	err = store.Set("user", jubako.Map("/settings", map[string]any{
+		"timeout": 30,
+		"retries": 3,
+	}))
+
+	// DeleteNilValue オプションで nil を設定して値を削除
+	err = store.Set("user",
+		jubako.Value("/old_field", nil),
+		jubako.DeleteNilValue(),
+	)
+
+	_ = ctx
+	_ = err
+}
+```
+
+**利用可能な SetOption 関数:**
+
+| 関数 | 説明 |
+|-----|-----|
+| `String(path, value)` | 文字列値を設定 |
+| `Int(path, value)` | 整数値を設定 |
+| `Int64(path, value)` | int64 値を設定 |
+| `Float(path, value)` | float64 値を設定 |
+| `Bool(path, value)` | 真偽値を設定 |
+| `Value(path, value)` | 任意の値を設定 |
+| `Struct(path, v)` | 構造体フィールドをパス・値ペアに展開 |
+| `Map(path, m)` | マップエントリをパス・値ペアに展開 |
+| `Path(prefix, opts...)` | 共通パスプレフィックス配下にオプションをグループ化 |
+| `SkipZeroValues()` | ゼロ値のエントリをスキップ |
+| `DeleteNilValue()` | nil 値を削除操作として扱う |
 
 ### オリジン追跡
 

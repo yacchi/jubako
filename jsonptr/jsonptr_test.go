@@ -1474,3 +1474,70 @@ func TestEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func TestJoin(t *testing.T) {
+	tests := []struct {
+		name string
+		base string
+		path string
+		want string
+	}{
+		{
+			name: "simple join",
+			base: "/server",
+			path: "port",
+			want: "/server/port",
+		},
+		{
+			name: "path with leading slash",
+			base: "/server",
+			path: "/port",
+			want: "/server/port",
+		},
+		{
+			name: "empty base",
+			base: "",
+			path: "port",
+			want: "/port",
+		},
+		{
+			name: "empty path",
+			base: "/server",
+			path: "",
+			want: "/server",
+		},
+		{
+			name: "both empty",
+			base: "",
+			path: "",
+			want: "",
+		},
+		{
+			name: "nested path",
+			base: "/a",
+			path: "/b/c",
+			want: "/a/b/c",
+		},
+		{
+			name: "base without leading slash",
+			base: "server",
+			path: "port",
+			want: "/server/port",
+		},
+		{
+			name: "deep nesting",
+			base: "/profiles/default",
+			path: "credential/username",
+			want: "/profiles/default/credential/username",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Join(tt.base, tt.path)
+			if got != tt.want {
+				t.Errorf("Join(%q, %q) = %q, want %q", tt.base, tt.path, got, tt.want)
+			}
+		})
+	}
+}

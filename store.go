@@ -739,6 +739,150 @@ func (s *Store[T]) setToLocked(layerName layer.Name, path string, value any) (T,
 	return s.materializeLocked()
 }
 
+// Set sets multiple values to a layer using functional options.
+// This method provides a flexible way to set values with type-safe helpers
+// and supports grouping, struct expansion, and behavior modifiers.
+//
+// Value options:
+//   - String(path, value): Set a string value
+//   - Int(path, value): Set an integer value
+//   - Bool(path, value): Set a boolean value
+//   - Float(path, value): Set a float64 value
+//   - Value(path, value): Set any value
+//   - Struct(path, v): Expand a struct into multiple path-value pairs
+//   - Map(path, m): Expand a map into multiple path-value pairs
+//   - Path(prefix, opts...): Group options under a common path prefix
+//
+// Behavior options:
+//   - SkipZeroValues(): Skip entries with zero values
+//   - DeleteNilValue(): Treat nil values as delete operations
+//
+// Example:
+//
+//	// Set multiple values
+//	err := store.Set("user",
+//	    jubako.Int("/server/port", 8080),
+//	    jubako.String("/server/host", "localhost"),
+//	)
+//
+//	// Use Path for grouping
+//	err := store.Set("user", jubako.Path("/server",
+//	    jubako.Int("port", 8080),
+//	    jubako.String("host", "localhost"),
+//	))
+//
+//	// Expand a struct
+//	err := store.Set("user",
+//	    jubako.Struct("/credential/default", cred),
+//	    jubako.SkipZeroValues(),
+//	)
+func (s *Store[T]) Set(layerName layer.Name, opts ...SetOption) error {
+	if len(opts) == 0 {
+		return nil
+	}
+
+	current, subscribers, err := s.setLocked(layerName, opts)
+	if err != nil {
+		return err
+	}
+	for _, sub := range subscribers {
+		sub.fn(current)
+	}
+	return nil
+}
+
+// setLocked performs the value setting and materialization under lock.
+// Returns the current configuration and subscribers snapshot for notification outside the lock.
+func (s *Store[T]) setLocked(layerName layer.Name, opts []SetOption) (T, []subscriber[T], error) {
+	// Build configuration from options
+	cfg := &setConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// No patches to apply
+	if len(cfg.patches) == 0 {
+		var zero T
+		return zero, nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry := s.findLayerLocked(layerName)
+	if entry == nil {
+		var zero T
+		return zero, nil, fmt.Errorf("layer %q not found", layerName)
+	}
+
+	if !entry.Writable() {
+		var zero T
+		if entry.readOnly {
+			return zero, nil, fmt.Errorf("layer %q is marked as read-only", layerName)
+		}
+		return zero, nil, fmt.Errorf("layer %q does not support saving (source is not writable)", layerName)
+	}
+
+	if entry.data == nil {
+		var zero T
+		return zero, nil, fmt.Errorf("layer %q has not been loaded", layerName)
+	}
+
+	// Apply patches
+	for _, pv := range cfg.patches {
+		// Handle SkipZeroValues
+		if cfg.skipZeroValues && isZeroValue(pv.value) {
+			continue
+		}
+
+		// Handle DeleteNilValue
+		if cfg.deleteNilValue && pv.value == nil {
+			// Delete operation
+			if jsonptr.DeletePath(entry.data, pv.path) {
+				entry.changeset = append(entry.changeset, document.JSONPatch{
+					Op:   document.PatchOpRemove,
+					Path: pv.path,
+				})
+				entry.dirty = true
+			}
+			continue
+		}
+
+		// Validate sensitivity
+		if err := validateSensitivity(s.mappingTable, pv.path, entry.sensitive); err != nil {
+			var zero T
+			return zero, nil, fmt.Errorf("%w: path %s, layer %s", err, pv.path, layerName)
+		}
+
+		// Set the value
+		result := jsonptr.SetPath(entry.data, pv.path, pv.value)
+		if !result.Success {
+			var zero T
+			return zero, nil, fmt.Errorf("failed to set value at path %q", pv.path)
+		}
+
+		// Determine the patch operation
+		var op document.PatchOp
+		if result.Created {
+			op = document.PatchOpAdd
+		} else {
+			op = document.PatchOpReplace
+		}
+
+		// Record the change
+		entry.changeset = append(entry.changeset, document.JSONPatch{
+			Op:    op,
+			Path:  pv.path,
+			Value: pv.value,
+		})
+
+		entry.dirty = true
+	}
+
+	// Re-materialize to update the resolved config
+	return s.materializeLocked()
+}
+
 // DeleteFrom removes values at the specified JSON Pointer paths from a specific layer.
 // The layer's data is updated in memory, but not persisted until Save() is called.
 // If a path does not exist, it is silently skipped.
