@@ -34,7 +34,7 @@ setup:
 
 # Prepare development environment (idempotent, safe to run multiple times)
 # - Creates/updates go.work with all modules and replace directives
-# - Replace directives are needed because v0.0.0 isn't published yet
+# - Replace directives redirect versioned dependencies to local paths
 # Use this in CI and before local development
 prepare:
 	@echo "Preparing development environment..."
@@ -49,7 +49,7 @@ prepare:
 	@echo "replace (" >> go.work
 	@for mod in $(ALL_MODULES); do \
 		modpath=$$(head -1 "$$mod/go.mod" | sed 's/^module //'); \
-		echo "	$$modpath v0.0.0 => $$mod" >> go.work; \
+		echo "	$$modpath v0.1.0 => $$mod" >> go.work; \
 	done
 	@echo ")" >> go.work
 	@echo "go.work created:"

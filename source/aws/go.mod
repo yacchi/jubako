@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/appconfigdata v1.23.17
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.72.0
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.56.0
-	github.com/yacchi/jubako v0.0.0
+	github.com/yacchi/jubako v0.1.0
 )
 
 require (
@@ -31,5 +31,3 @@ require (
 	github.com/aws/smithy-go v1.24.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 )
-
-replace github.com/yacchi/jubako => ../..

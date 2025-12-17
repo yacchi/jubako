@@ -6,8 +6,8 @@ toolchain go1.24.10
 
 require (
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/yacchi/jubako v0.0.0
-	github.com/yacchi/jubako/format/yaml v0.0.0
+	github.com/yacchi/jubako v0.1.0
+	github.com/yacchi/jubako/format/yaml v0.1.0
 )
 
 require gopkg.in/yaml.v3 v3.0.1 // indirect
