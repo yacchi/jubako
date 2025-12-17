@@ -26,6 +26,15 @@ done)
 # Dependent modules (modules that depend on root, i.e., ALL_MODULES excluding root ".")
 DEP_MODULES := $(filter-out .,$(ALL_MODULES))
 
+# Versioned modules (modules that actually depend on BASE_MODULE)
+# Looks for "BASE_MODULE v" pattern which appears in require blocks, not module declarations
+# This automatically excludes tool modules like ./scripts that don't depend on the main package
+VERSIONED_MODULES := $(shell for mod in $(DEP_MODULES); do \
+	if grep -q "$(BASE_MODULE) v" "$$mod/go.mod" 2>/dev/null; then \
+		echo "$$mod"; \
+	fi; \
+done)
+
 # Note: Use 'make prepare' for idempotent setup (CI and local)
 ## Setup go.work for local development (required before build/test)
 setup:
@@ -71,7 +80,7 @@ prepare:
 ## Update all go.mod files to use VERSION from version.txt
 update-version:
 	@echo "Updating all modules to $(VERSION)..."
-	@for mod in $(DEP_MODULES); do \
+	@for mod in $(VERSIONED_MODULES); do \
 		echo "Updating $$mod/go.mod..."; \
 		for target in $(ALL_MODULES); do \
 			targetpath=$$(head -1 "$$target/go.mod" | sed 's/^module //'); \
@@ -85,7 +94,7 @@ update-version:
 verify-version:
 	@echo "Verifying go.mod versions match $(VERSION)..."
 	@errors=0; \
-	for mod in $(DEP_MODULES); do \
+	for mod in $(VERSIONED_MODULES); do \
 		if [ -f "$$mod/go.mod" ]; then \
 			if ! grep -q "$(BASE_MODULE) $(VERSION)" "$$mod/go.mod" 2>/dev/null; then \
 				echo "ERROR: $$mod/go.mod does not reference $(BASE_MODULE) $(VERSION)"; \
@@ -234,7 +243,7 @@ check-release:
 			errors=1; \
 		fi; \
 	done; \
-	for mod in $(DEP_MODULES); do \
+	for mod in $(VERSIONED_MODULES); do \
 		if grep -q "$(BASE_MODULE) v0\.0\.0" "$$mod/go.mod" 2>/dev/null; then \
 			echo "ERROR: $$mod/go.mod references $(BASE_MODULE) v0.0.0 (run 'make update-version')"; \
 			errors=1; \
