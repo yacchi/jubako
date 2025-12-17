@@ -1206,6 +1206,28 @@ type Config struct {
 }
 ```
 
+**Map/Slice の動的マッピング:**
+
+`{key}` や `{index}` プレースホルダーを使用して、Map のキーや Slice のインデックスを動的にマッピングできます。
+
+```go
+type Config struct {
+	// Map キー: APP_USERS_ALICE_NAME -> /users/ALICE/name
+	Users map[string]User `json:"users"`
+	// Slice インデックス: APP_PORTS_0_NUM -> /ports/0/num
+	Ports []PortConfig    `json:"ports"`
+}
+
+type User struct {
+	Name string `json:"name" jubako:"env:USERS_{key}_NAME"`
+	Role string `json:"role" jubako:"env:USERS_{key}_ROLE"`
+}
+
+type PortConfig struct {
+	Num int `json:"num" jubako:"env:PORTS_{index}_NUM"`
+}
+```
+
 ## 独自フォーマット・ソースの作成
 
 Jubako は拡張可能なアーキテクチャを持っています。独自のフォーマットやソースを実装できます。

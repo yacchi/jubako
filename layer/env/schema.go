@@ -3,6 +3,7 @@ package env
 
 import (
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,10 +22,22 @@ type EnvMapping struct {
 	FieldType reflect.Type
 }
 
+// PatternMapping represents a dynamic environment variable mapping using placeholders.
+type PatternMapping struct {
+	// EnvPattern is the compiled regex for matching environment variables.
+	EnvPattern *regexp.Regexp
+	// JSONPathPattern is the target JSON Pointer path with placeholders (e.g., "/users/{key}/name").
+	JSONPathPattern string
+	// FieldType is the target field type.
+	FieldType reflect.Type
+}
+
 // SchemaMapping holds all env var mappings derived from struct tags.
 type SchemaMapping struct {
 	// Mappings maps env var names (without prefix) to their mapping info.
 	Mappings map[string]*EnvMapping
+	// Patterns holds dynamic mappings with placeholders.
+	Patterns []PatternMapping
 }
 
 // BuildSchemaMapping analyzes struct T and extracts env: directives from jubako tags.
@@ -34,14 +47,15 @@ type SchemaMapping struct {
 // For example, with prefix "APP_" and tag `jubako:"env:SERVER_PORT"`,
 // the mapping will match environment variable "APP_SERVER_PORT".
 //
+// Pattern matching is supported for Maps and Slices using {key} and {index} placeholders.
 // Example:
 //
 //	type Config struct {
-//	    Port int    `json:"port" jubako:"env:SERVER_PORT"`
-//	    Host string `json:"host" jubako:"env:SERVER_HOST"`
+//	    Users map[string]User `jubako:"env:USERS_{key}"`
 //	}
-//
-//	schema := BuildSchemaMapping[Config]()
+//	type User struct {
+//	    Name string `jubako:"env:USERS_{key}_NAME"`
+//	}
 func BuildSchemaMapping[T any]() *SchemaMapping {
 	var zero T
 	return buildSchemaMappingFromType(reflect.TypeOf(zero), "")
@@ -53,11 +67,15 @@ func buildSchemaMappingFromType(t reflect.Type, basePath string) *SchemaMapping 
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
-		return &SchemaMapping{Mappings: make(map[string]*EnvMapping)}
+		return &SchemaMapping{
+			Mappings: make(map[string]*EnvMapping),
+			Patterns: []PatternMapping{},
+		}
 	}
 
 	schema := &SchemaMapping{
 		Mappings: make(map[string]*EnvMapping),
+		Patterns: []PatternMapping{},
 	}
 
 	for i := 0; i < t.NumField(); i++ {
@@ -80,6 +98,7 @@ func buildSchemaMappingFromType(t reflect.Type, basePath string) *SchemaMapping 
 		fieldPath := basePath + "/" + jsonptr.Escape(tagInfo.FieldKey)
 
 		// Check for env: directive
+		var currentPattern *PatternMapping
 		if tagInfo.EnvVar != "" {
 			// Use custom path if specified, otherwise use field path
 			jsonPath := fieldPath
@@ -87,30 +106,98 @@ func buildSchemaMappingFromType(t reflect.Type, basePath string) *SchemaMapping 
 				jsonPath = tagInfo.Path
 			}
 
-			schema.Mappings[tagInfo.EnvVar] = &EnvMapping{
-				EnvVar:    tagInfo.EnvVar,
-				JSONPath:  jsonPath,
-				FieldType: unwrapPointer(field.Type),
+			if hasPlaceholders(tagInfo.EnvVar) {
+				// Dynamic mapping
+				regex, err := compileEnvPattern(tagInfo.EnvVar)
+				if err == nil {
+					currentPattern = &PatternMapping{
+						EnvPattern:      regex,
+						JSONPathPattern: jsonPath,
+						FieldType:       unwrapPointer(field.Type),
+					}
+				}
+			} else {
+				// Static mapping
+				schema.Mappings[tagInfo.EnvVar] = &EnvMapping{
+					EnvVar:    tagInfo.EnvVar,
+					JSONPath:  jsonPath,
+					FieldType: unwrapPointer(field.Type),
+				}
 			}
 		}
 
-		// Recursively process nested structs
-		fieldType := field.Type
-		if fieldType.Kind() == reflect.Ptr {
-			fieldType = fieldType.Elem()
+		// Recursively process nested types
+		nextType := field.Type
+		nextPath := fieldPath
+
+		if nextType.Kind() == reflect.Ptr {
+			nextType = nextType.Elem()
 		}
 
-		if fieldType.Kind() == reflect.Struct && !isSpecialType(fieldType) {
-			nested := buildSchemaMappingFromType(fieldType, fieldPath)
+		shouldRecurse := false
+		if nextType.Kind() == reflect.Struct {
+			shouldRecurse = true
+		} else if nextType.Kind() == reflect.Slice {
+			nextType = nextType.Elem()
+			nextPath = nextPath + "/{index}"
+			shouldRecurse = isStructOrPtrStruct(nextType)
+		} else if nextType.Kind() == reflect.Map {
+			nextType = nextType.Elem()
+			nextPath = nextPath + "/{key}"
+			shouldRecurse = isStructOrPtrStruct(nextType)
+		}
+
+		if shouldRecurse && !isSpecialType(nextType) {
+			nested := buildSchemaMappingFromType(nextType, nextPath)
+			// Merge nested mappings
 			for k, v := range nested.Mappings {
 				if _, exists := schema.Mappings[k]; !exists {
 					schema.Mappings[k] = v
 				}
 			}
+			// Merge nested patterns
+			schema.Patterns = append(schema.Patterns, nested.Patterns...)
+		}
+
+		// Add current pattern after nested patterns (so specific nested patterns are checked first)
+		if currentPattern != nil {
+			schema.Patterns = append(schema.Patterns, *currentPattern)
 		}
 	}
 
 	return schema
+}
+
+func isStructOrPtrStruct(t reflect.Type) bool {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Struct
+}
+
+// hasPlaceholders checks if the string contains {key} or {index}.
+func hasPlaceholders(s string) bool {
+	return strings.Contains(s, "{key}") || strings.Contains(s, "{index}")
+}
+
+// compileEnvPattern converts an env var pattern to a regexp.
+// e.g. "USERS_{key}_NAME" -> "^USERS_(?P<key>.+)_NAME$"
+// e.g. "PORTS_{index}" -> "^PORTS_(?P<index>\d+)$"
+func compileEnvPattern(pattern string) (*regexp.Regexp, error) {
+	// Escape the pattern first to handle special regex characters
+	regexStr := regexp.QuoteMeta(pattern)
+
+	// Replace {key} with named group
+	// We unquote the braces for replacement
+	regexStr = strings.ReplaceAll(regexStr, "\\{key\\}", "(?P<key>.+)")
+
+	// Replace {index} with named group matching digits
+	regexStr = strings.ReplaceAll(regexStr, "\\{index\\}", "(?P<index>\\d+)")
+
+	// Anchor to full string
+	regexStr = "^" + regexStr + "$"
+
+	return regexp.Compile(regexStr)
 }
 
 // unwrapPointer returns the underlying type if t is a pointer, otherwise returns t.
@@ -140,17 +227,41 @@ func isSpecialType(t reflect.Type) bool {
 // causing the env layer to skip that variable.
 func (s *SchemaMapping) CreateTransformFunc() TransformFunc {
 	return func(key, value string) (path string, finalValue any) {
-		mapping, ok := s.Mappings[key]
-		if !ok {
-			return "", nil // Skip unmapped vars
+		// 1. Check exact mappings
+		if mapping, ok := s.Mappings[key]; ok {
+			converted, err := convertStringToType(value, mapping.FieldType)
+			if err != nil {
+				return "", nil
+			}
+			return mapping.JSONPath, converted
 		}
 
-		converted, err := convertStringToType(value, mapping.FieldType)
-		if err != nil {
-			return "", nil // Skip on conversion error
+		// 2. Check pattern mappings
+		for _, pattern := range s.Patterns {
+			if pattern.EnvPattern.MatchString(key) {
+				matches := pattern.EnvPattern.FindStringSubmatch(key)
+				jsonPath := pattern.JSONPathPattern
+
+				// Replace placeholders in JSON path with captured values
+				for i, name := range pattern.EnvPattern.SubexpNames() {
+					if i != 0 && name != "" {
+						// matches[i] contains the captured value for the group 'name'
+						// We need to replace {name} in the jsonPath with matches[i]
+						// Note: jsonptr requires escaping if the key contains special chars like "/" or "~"
+						escapedValue := jsonptr.Escape(matches[i])
+						jsonPath = strings.ReplaceAll(jsonPath, "{"+name+"}", escapedValue)
+					}
+				}
+
+				converted, err := convertStringToType(value, pattern.FieldType)
+				if err != nil {
+					continue // Try next pattern? Or stop? usually unique match preferred.
+				}
+				return jsonPath, converted
+			}
 		}
 
-		return mapping.JSONPath, converted
+		return "", nil // Skip unmapped vars
 	}
 }
 

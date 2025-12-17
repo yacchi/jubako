@@ -1245,6 +1245,28 @@ type Config struct {
 }
 ```
 
+**Dynamic Map/Slice Mapping:**
+
+You can use `{key}` and `{index}` placeholders to map dynamic keys in maps and indices in slices.
+
+```go
+type Config struct {
+	// Map keys: APP_USERS_ALICE_NAME -> /users/ALICE/name
+	Users map[string]User `json:"users"`
+	// Slice indices: APP_PORTS_0_NUM -> /ports/0/num
+	Ports []PortConfig    `json:"ports"`
+}
+
+type User struct {
+	Name string `json:"name" jubako:"env:USERS_{key}_NAME"`
+	Role string `json:"role" jubako:"env:USERS_{key}_ROLE"`
+}
+
+type PortConfig struct {
+	Num int `json:"num" jubako:"env:PORTS_{index}_NUM"`
+}
+```
+
 ## Custom Format and Source Implementation
 
 Jubako has an extensible architecture. You can implement custom formats and sources.
