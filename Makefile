@@ -1,4 +1,4 @@
-.PHONY: build test lint clean fmt vet examples setup prepare check-release check-ci tidy ci-test ci-lint ci-release version update-version verify-version check-tags release-tag release
+.PHONY: build test lint clean fmt vet examples readme-extract readme-examples check-examples setup prepare check-release check-ci tidy ci-test ci-lint ci-release version update-version verify-version check-tags release-tag release
 
 GOCACHE ?= $(CURDIR)/.gocache
 export GOCACHE
@@ -49,7 +49,7 @@ version:
 # Use this in CI and before local development
 prepare:
 	@echo "Preparing development environment (version: $(VERSION))..."
-	@echo "go 1.24" > go.work
+	@echo "go 1.24.0" > go.work
 	@echo "" >> go.work
 	@echo "use (" >> go.work
 	@for mod in $(ALL_MODULES); do \
@@ -142,10 +142,39 @@ build:
 examples:
 	@echo "Running examples..."
 	@for dir in examples/*/; do \
-		echo "  Running $$dir..."; \
-		go run "./$$dir" || exit 1; \
+		if [ "$$(basename $$dir)" != ".readme" ]; then \
+			echo "  Running $$dir..."; \
+			go run "./$$dir" || exit 1; \
+		fi; \
 	done
 	@echo "All examples passed."
+
+# Extract README code blocks to examples/.readme/
+readme-extract:
+	@go run ./scripts/extract-readme
+
+# Run extracted README examples
+# Creates stub config files that some README examples expect
+readme-examples: readme-extract
+	@echo "Running README examples..."
+	@mkdir -p ~/.config/app
+	@touch ~/.config/app/config.yaml
+	@touch .app.yaml
+	@if [ -d examples/.readme ]; then \
+		for dir in examples/.readme/*/; do \
+			if [ -d "$$dir" ]; then \
+				echo "  Running $$dir..."; \
+				go run "./$$dir" || exit 1; \
+			fi; \
+		done; \
+		echo "README examples passed."; \
+	else \
+		echo "No README examples to run."; \
+	fi
+
+# Combined check: existing examples + README examples
+check-examples: examples readme-examples
+	@echo "All examples verified."
 
 # Test all modules
 test:

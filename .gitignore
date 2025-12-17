@@ -40,3 +40,9 @@ Thumbs.db
 # Local review tasks
 REVIEW_TASKS.md
 coverage.txt
+
+# Generated README examples (extracted by scripts/extract-readme)
+examples/.readme/
+
+# Stub files created by readme-examples test
+.app.yaml
