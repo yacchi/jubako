@@ -1,7 +1,14 @@
-.PHONY: build test lint clean fmt vet examples setup prepare check-release check-ci tidy ci-test ci-lint
+.PHONY: build test lint clean fmt vet examples setup prepare check-release check-ci tidy ci-test ci-lint ci-release version update-version verify-version check-tags release-tag release
 
 GOCACHE ?= $(CURDIR)/.gocache
 export GOCACHE
+
+# Base module name from go.mod
+BASE_MODULE := $(shell head -1 go.mod | sed 's/^module //')
+
+# Version from version.txt (without 'v' prefix)
+VERSION_NUM := $(shell cat version.txt 2>/dev/null || echo "0.0.0")
+VERSION := v$(VERSION_NUM)
 
 # Find all modules with go.mod (excluding .gopath and vendor)
 ALL_MODULES := $(shell find . -name "go.mod" -not -path "./.gopath/*" -not -path "./vendor/*" -exec dirname {} \; | sort)
@@ -32,12 +39,16 @@ setup:
 		echo "go.work already exists."; \
 	fi
 
+# Show current version
+version:
+	@echo $(VERSION)
+
 # Prepare development environment (idempotent, safe to run multiple times)
 # - Creates/updates go.work with all modules and replace directives
 # - Replace directives redirect versioned dependencies to local paths
 # Use this in CI and before local development
 prepare:
-	@echo "Preparing development environment..."
+	@echo "Preparing development environment (version: $(VERSION))..."
 	@echo "go 1.24" > go.work
 	@echo "" >> go.work
 	@echo "use (" >> go.work
@@ -49,11 +60,79 @@ prepare:
 	@echo "replace (" >> go.work
 	@for mod in $(ALL_MODULES); do \
 		modpath=$$(head -1 "$$mod/go.mod" | sed 's/^module //'); \
-		echo "	$$modpath v0.1.0 => $$mod" >> go.work; \
+		echo "	$$modpath $(VERSION) => $$mod" >> go.work; \
 	done
 	@echo ")" >> go.work
 	@echo "go.work created:"
 	@cat go.work
+
+# Update all go.mod files to use VERSION from version.txt
+# Dynamically updates all module references based on BASE_MODULE and ALL_MODULES
+update-version:
+	@echo "Updating all modules to $(VERSION)..."
+	@for mod in $(DEP_MODULES); do \
+		echo "Updating $$mod/go.mod..."; \
+		for target in $(ALL_MODULES); do \
+			targetpath=$$(head -1 "$$target/go.mod" | sed 's/^module //'); \
+			sed -i '' "s|$$targetpath v[0-9.]*|$$targetpath $(VERSION)|g" "$$mod/go.mod"; \
+		done; \
+	done
+	@echo "All modules updated to $(VERSION)"
+
+# Verify go.mod versions match version.txt (used by CI)
+# Checks that all dependent modules reference BASE_MODULE at VERSION
+verify-version:
+	@echo "Verifying go.mod versions match $(VERSION)..."
+	@errors=0; \
+	for mod in $(DEP_MODULES); do \
+		if [ -f "$$mod/go.mod" ]; then \
+			if ! grep -q "$(BASE_MODULE) $(VERSION)" "$$mod/go.mod" 2>/dev/null; then \
+				echo "ERROR: $$mod/go.mod does not reference $(BASE_MODULE) $(VERSION)"; \
+				errors=1; \
+			fi; \
+		fi; \
+	done; \
+	if [ $$errors -ne 0 ]; then \
+		echo "Version mismatch. Run 'make update-version' and commit."; \
+		exit 1; \
+	fi
+	@echo "All go.mod files reference $(VERSION)"
+
+# Check if release tags already exist
+check-tags:
+	@echo "Checking if tags for $(VERSION) exist..."
+	@if git rev-parse "$(VERSION)" >/dev/null 2>&1; then \
+		echo "Tag $(VERSION) already exists"; \
+		exit 1; \
+	fi
+	@for mod in $(DEP_MODULES); do \
+		modname=$$(echo "$$mod" | sed 's|^\./||'); \
+		tag="$$modname/$(VERSION)"; \
+		if git rev-parse "$$tag" >/dev/null 2>&1; then \
+			echo "Tag $$tag already exists"; \
+			exit 1; \
+		fi; \
+	done
+	@echo "No existing tags for $(VERSION)"
+
+# Create release tags for all modules (does not push)
+release-tag: check-tags
+	@echo "Creating release tags for $(VERSION)..."
+	@git tag $(VERSION)
+	@echo "Created tag: $(VERSION)"
+	@for mod in $(DEP_MODULES); do \
+		modname=$$(echo "$$mod" | sed 's|^\./||'); \
+		tag="$$modname/$(VERSION)"; \
+		git tag "$$tag"; \
+		echo "Created tag: $$tag"; \
+	done
+	@echo "All tags created. Push with: git push --tags"
+
+# Full release process (verify + tag + push tags)
+release: verify-version release-tag
+	@echo "Pushing tags..."
+	@git push --tags
+	@echo "Release $(VERSION) complete!"
 
 # Build
 build:
@@ -114,9 +193,10 @@ tidy:
 
 # Check for release readiness
 # - No replace directives in any go.mod files
-# - No v0.0.0 dependencies in submodules (placeholder versions)
+# - All go.mod files use VERSION from version.txt
+# - No v0.0.0 dependencies
 check-release:
-	@echo "Checking release readiness..."
+	@echo "Checking release readiness (version: $(VERSION))..."
 	@errors=0; \
 	for mod in $(ALL_MODULES); do \
 		if grep -q "^replace " "$$mod/go.mod" 2>/dev/null; then \
@@ -125,9 +205,12 @@ check-release:
 		fi; \
 	done; \
 	for mod in $(DEP_MODULES); do \
-		if grep -q "github.com/yacchi/jubako v0\.0\.0" "$$mod/go.mod" 2>/dev/null; then \
-			echo "ERROR: $$mod/go.mod references jubako v0.0.0 (update to released version)"; \
+		if grep -q "$(BASE_MODULE) v0\.0\.0" "$$mod/go.mod" 2>/dev/null; then \
+			echo "ERROR: $$mod/go.mod references $(BASE_MODULE) v0.0.0 (run 'make update-version')"; \
 			errors=1; \
+		fi; \
+		if ! grep -q "$(BASE_MODULE) $(VERSION)" "$$mod/go.mod" 2>/dev/null; then \
+			echo "WARNING: $$mod/go.mod may not reference $(VERSION)"; \
 		fi; \
 	done; \
 	if [ $$errors -eq 0 ]; then \
@@ -173,3 +256,17 @@ ci-lint:
 		echo "Vetting $$mod..."; \
 		(cd $$mod && go vet ./...) || exit 1; \
 	done
+
+# CI release task - complete release process for CI
+# Skips if tag already exists, otherwise: verify + tag + push
+ci-release:
+	@echo "CI Release for $(VERSION)..."
+	@if git rev-parse "$(VERSION)" >/dev/null 2>&1; then \
+		echo "Tag $(VERSION) already exists. Skipping release."; \
+		exit 0; \
+	fi
+	@$(MAKE) verify-version
+	@$(MAKE) release-tag
+	@echo "Pushing tags..."
+	@git push --tags
+	@echo "Release $(VERSION) complete!"
