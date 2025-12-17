@@ -1611,22 +1611,230 @@ func TestMappingTable_String_NilReceiver(t *testing.T) {
 
 func TestParseJubakoTag(t *testing.T) {
 	tests := []struct {
-		in       string
-		wantPath string
-		wantRel  bool
+		in            string
+		wantPath      string
+		wantRel       bool
+		wantSensitive sensitiveState
 	}{
-		{"", "", false},
-		{"/a/b", "/a/b", false},
-		{"a/b", "/a/b", true},
-		{"./a/b", "/a/b", true},
-		{"a/b,option", "/a/b", true},
+		{"", "", false, sensitiveInherit},
+		{"/a/b", "/a/b", false, sensitiveInherit},
+		{"a/b", "/a/b", true, sensitiveInherit},
+		{"./a/b", "/a/b", true, sensitiveInherit},
+		{"a/b,option", "/a/b", true, sensitiveInherit},
+		// Sensitive directive tests
+		{"sensitive", "", false, sensitiveExplicit},
+		{"!sensitive", "", false, sensitiveExplicitNot},
+		{"/a/b,sensitive", "/a/b", false, sensitiveExplicit},
+		{"a/b,sensitive", "/a/b", true, sensitiveExplicit},
+		{"/a/b,!sensitive", "/a/b", false, sensitiveExplicitNot},
+		{"./path,sensitive", "/path", true, sensitiveExplicit},
+		// Comma-prefixed directive (no path, explicit delimiter style)
+		{",sensitive", "", false, sensitiveExplicit},
+		{",!sensitive", "", false, sensitiveExplicitNot},
+		// Multiple directives (last one wins)
+		{",sensitive,!sensitive", "", false, sensitiveExplicitNot},
 	}
 	for _, tt := range tests {
-		gotPath, gotRel := parseJubakoTag(tt.in)
-		if gotPath != tt.wantPath || gotRel != tt.wantRel {
-			t.Fatalf("parseJubakoTag(%q) = (%q, %v), want (%q, %v)", tt.in, gotPath, gotRel, tt.wantPath, tt.wantRel)
+		gotPath, gotRel, gotSensitive := parseJubakoTag(tt.in, DefaultTagDelimiter)
+		if gotPath != tt.wantPath || gotRel != tt.wantRel || gotSensitive != tt.wantSensitive {
+			t.Fatalf("parseJubakoTag(%q) = (%q, %v, %v), want (%q, %v, %v)",
+				tt.in, gotPath, gotRel, gotSensitive, tt.wantPath, tt.wantRel, tt.wantSensitive)
 		}
 	}
+}
+
+func TestParseJubakoTag_CustomDelimiter(t *testing.T) {
+	// Test with semicolon delimiter to allow commas in paths
+	tests := []struct {
+		in            string
+		delimiter     string
+		wantPath      string
+		wantRel       bool
+		wantSensitive sensitiveState
+	}{
+		// With semicolon delimiter, commas are part of the path
+		{"/path,with,commas", ";", "/path,with,commas", false, sensitiveInherit},
+		{"/path,with,commas;sensitive", ";", "/path,with,commas", false, sensitiveExplicit},
+		{"path,with,commas;sensitive", ";", "/path,with,commas", true, sensitiveExplicit},
+		{"./path,with,commas;!sensitive", ";", "/path,with,commas", true, sensitiveExplicitNot},
+		// Directive-only with custom delimiter
+		{"sensitive", ";", "", false, sensitiveExplicit},
+		{"!sensitive", ";", "", false, sensitiveExplicitNot},
+		// With pipe delimiter
+		{"/a|b|c|sensitive", "|", "/a", false, sensitiveExplicit},
+	}
+	for _, tt := range tests {
+		gotPath, gotRel, gotSensitive := parseJubakoTag(tt.in, tt.delimiter)
+		if gotPath != tt.wantPath || gotRel != tt.wantRel || gotSensitive != tt.wantSensitive {
+			t.Fatalf("parseJubakoTag(%q, %q) = (%q, %v, %v), want (%q, %v, %v)",
+				tt.in, tt.delimiter, gotPath, gotRel, gotSensitive, tt.wantPath, tt.wantRel, tt.wantSensitive)
+		}
+	}
+}
+
+func TestWithTagDelimiter(t *testing.T) {
+	ctx := context.Background()
+
+	// Config struct with paths containing commas (using semicolon delimiter)
+	type configWithCommas struct {
+		// Field mapped to a path that contains commas: /settings/foo,bar
+		Value string `json:"value" jubako:"/settings/foo,bar;sensitive"`
+	}
+
+	// Create store with semicolon delimiter
+	store := New[configWithCommas](WithTagDelimiter(";"))
+
+	// Add layer with data containing comma in key name
+	if err := store.Add(mapdata.New("test", map[string]any{
+		"settings": map[string]any{
+			"foo,bar": "secret-value",
+		},
+	}), WithSensitive()); err != nil {
+		t.Fatalf("Add error: %v", err)
+	}
+
+	if err := store.Load(ctx); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+
+	// Verify the value was correctly mapped
+	config := store.Get()
+	if config.Value != "secret-value" {
+		t.Fatalf("expected Value='secret-value', got %q", config.Value)
+	}
+
+	// Verify sensitivity is correctly parsed
+	rv := store.GetAt("/settings/foo,bar")
+	if !rv.Exists {
+		t.Fatal("expected /settings/foo,bar to exist")
+	}
+}
+
+func TestWithTagName(t *testing.T) {
+	ctx := context.Background()
+
+	// Note: WithTagName changes the tag used for:
+	// - Path resolution in GetAt, Walk, SetTo
+	// - Sensitivity checking in MappingTable
+	// The decoder (default: JSON) still uses its own tag (json).
+	// For full consistency, use WithDecoder with a matching decoder.
+
+	t.Run("path resolution uses specified tag", func(t *testing.T) {
+		// Config struct with yaml tags
+		// Note: json tags are still needed for the default decoder
+		type yamlConfig struct {
+			Server struct {
+				Host string `yaml:"host" json:"host"`
+				Port int    `yaml:"port" json:"port"`
+			} `yaml:"server" json:"server"`
+			// Field with different yaml and json tag names
+			Name string `yaml:"app_name" json:"app_name"`
+		}
+
+		// Create store with yaml tag name for path resolution
+		store := New[yamlConfig](WithTagName("yaml"))
+
+		if err := store.Add(mapdata.New("test", map[string]any{
+			"server": map[string]any{
+				"host": "localhost",
+				"port": 8080,
+			},
+			"app_name": "my-app",
+		})); err != nil {
+			t.Fatalf("Add error: %v", err)
+		}
+
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load error: %v", err)
+		}
+
+		// GetAt uses yaml tag for path resolution
+		rv := store.GetAt("/server/host")
+		if !rv.Exists || rv.Value != "localhost" {
+			t.Fatalf("GetAt(/server/host) = %v, want localhost", rv.Value)
+		}
+
+		rv = store.GetAt("/app_name")
+		if !rv.Exists || rv.Value != "my-app" {
+			t.Fatalf("GetAt(/app_name) = %v, want my-app", rv.Value)
+		}
+
+		// Struct decoding also works because json tags match
+		config := store.Get()
+		if config.Server.Host != "localhost" {
+			t.Fatalf("expected Host='localhost', got %q", config.Server.Host)
+		}
+		if config.Name != "my-app" {
+			t.Fatalf("expected Name='my-app', got %q", config.Name)
+		}
+	})
+
+	t.Run("fallback to field name when tag is missing", func(t *testing.T) {
+		type configNoTag struct {
+			Value string // No tag at all - uses field name "Value"
+		}
+
+		store := New[configNoTag](WithTagName("yaml"))
+
+		if err := store.Add(mapdata.New("test", map[string]any{
+			"Value": "test-value", // Uses field name as-is
+		})); err != nil {
+			t.Fatalf("Add error: %v", err)
+		}
+
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load error: %v", err)
+		}
+
+		// Path resolution uses field name when no tag exists
+		rv := store.GetAt("/Value")
+		if !rv.Exists || rv.Value != "test-value" {
+			t.Fatalf("GetAt(/Value) = %v, want test-value", rv.Value)
+		}
+
+		config := store.Get()
+		if config.Value != "test-value" {
+			t.Fatalf("expected Value='test-value', got %q", config.Value)
+		}
+	})
+
+	t.Run("sensitivity uses specified tag", func(t *testing.T) {
+		// Test that sensitivity checking uses the specified tag
+		type sensitiveYamlConfig struct {
+			Secret string `yaml:"secret" json:"secret" jubako:"sensitive"`
+			Public string `yaml:"public" json:"public"`
+		}
+
+		store := New[sensitiveYamlConfig](WithTagName("yaml"))
+
+		if err := store.Add(mapdata.New("secrets", map[string]any{
+			"secret": "secret-value",
+		}), WithSensitive()); err != nil {
+			t.Fatalf("Add error: %v", err)
+		}
+
+		if err := store.Add(mapdata.New("normal", map[string]any{
+			"public": "public-value",
+		})); err != nil {
+			t.Fatalf("Add error: %v", err)
+		}
+
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load error: %v", err)
+		}
+
+		// Try to write sensitive field to normal layer (should fail)
+		err := store.SetTo("normal", "/secret", "new-secret")
+		if err == nil {
+			t.Fatal("expected error when writing sensitive field to normal layer")
+		}
+
+		// Write sensitive field to sensitive layer (should succeed)
+		err = store.SetTo("secrets", "/secret", "new-secret")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestWalkContext_AllValues_EmptyOrigin(t *testing.T) {
@@ -1720,11 +1928,11 @@ func TestBuildMappingTable_ComplexTypes(t *testing.T) {
 		private string
 	}
 
-	if got := buildMappingTable(reflect.TypeOf(0)); got != nil {
+	if got := buildMappingTable(reflect.TypeOf(0), DefaultTagDelimiter, DefaultFieldTagName); got != nil {
 		t.Fatalf("buildMappingTable(non-struct) = %v, want nil", got)
 	}
 
-	table := buildMappingTable(reflect.TypeOf(cfg{}))
+	table := buildMappingTable(reflect.TypeOf(cfg{}), DefaultTagDelimiter, DefaultFieldTagName)
 	if table == nil || table.IsEmpty() {
 		t.Fatal("buildMappingTable() returned empty table")
 	}
@@ -1732,7 +1940,7 @@ func TestBuildMappingTable_ComplexTypes(t *testing.T) {
 		t.Fatal("MappingTable.String() returned empty")
 	}
 
-	table = buildMappingTable(reflect.TypeOf(&cfg{}))
+	table = buildMappingTable(reflect.TypeOf(&cfg{}), DefaultTagDelimiter, DefaultFieldTagName)
 	if table == nil || table.IsEmpty() {
 		t.Fatal("buildMappingTable(ptr) returned empty table")
 	}
@@ -1747,7 +1955,7 @@ func TestApplyMappingsWithRoot_SliceAndMapFallbacks(t *testing.T) {
 		Dict map[string]inner `json:"dict"`
 	}
 
-	table := buildMappingTable(reflect.TypeOf(cfg{}))
+	table := buildMappingTable(reflect.TypeOf(cfg{}), DefaultTagDelimiter, DefaultFieldTagName)
 	src := map[string]any{
 		"list": []any{
 			"not-a-map",

@@ -9,9 +9,13 @@ import "github.com/yacchi/jubako/jsonptr"
 //   - Key does not exist: Exists=false, Value=nil, Layer=nil
 //   - Explicit null: Exists=true, Value=nil, Layer!=nil (IsNull() returns true)
 //   - Non-null value: Exists=true, Value=<value>, Layer!=nil (HasValue() returns true)
+//
+// If the value is from a sensitive field and masking is enabled, Masked will be true
+// and Value will contain the masked value instead of the original.
 type ResolvedValue struct {
 	// Value is the resolved value at the path.
 	// If Exists is false, this will be nil.
+	// If Masked is true, this contains the masked value, not the original.
 	Value any
 
 	// Exists indicates whether the key exists at this path.
@@ -21,6 +25,11 @@ type ResolvedValue struct {
 	// Layer provides metadata about the layer that provided this value.
 	// nil if the value is not set.
 	Layer LayerInfo
+
+	// Masked indicates whether the value has been masked for security.
+	// When true, Value contains the masked representation, not the original.
+	// Use Store.GetAtUnmasked to retrieve the original value.
+	Masked bool
 }
 
 // IsNull returns true if the key exists but the value is explicitly null.
@@ -183,13 +192,39 @@ type WalkContext struct {
 	Path string
 
 	origin *origin
+
+	// maskFunc is the function to apply for sensitive values (may be nil)
+	maskFunc SensitiveMaskFunc
+	// sensitive indicates if this path is sensitive
+	sensitive bool
 }
 
 // Value returns the resolved value at this path from the highest priority layer.
-// This is equivalent to calling Store.GetAt(ctx.Path).
+// If the path is sensitive and masking is enabled, the returned value will be masked.
+// Use ValueUnmasked to get the original value.
 func (c WalkContext) Value() ResolvedValue {
 	entry := c.origin.get()
+	rv := newResolvedValue(entry, c.Path)
+
+	// Apply masking if configured and path is sensitive
+	if c.maskFunc != nil && c.sensitive && rv.Exists {
+		rv.Value = c.maskFunc(rv.Value)
+		rv.Masked = true
+	}
+
+	return rv
+}
+
+// ValueUnmasked returns the resolved value at this path without masking.
+// Use this when you need the actual value for processing.
+func (c WalkContext) ValueUnmasked() ResolvedValue {
+	entry := c.origin.get()
 	return newResolvedValue(entry, c.Path)
+}
+
+// IsSensitive returns whether this path is marked as sensitive.
+func (c WalkContext) IsSensitive() bool {
+	return c.sensitive
 }
 
 // AllValues returns all values at this path from all layers that have a value.

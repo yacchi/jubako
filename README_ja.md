@@ -12,6 +12,7 @@
 - [インストール](#インストール)
 - [クイックスタート](#クイックスタート)
 - [コアコンセプト](#コアコンセプト)
+    - [データフロー](#データフロー)
     - [レイヤー](#レイヤー)
     - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
     - [設定構造体の定義](#設定構造体の定義)
@@ -148,8 +149,195 @@ func main() {
 - [origin-tracking](examples/origin-tracking/) - オリジン追跡機能の詳細
 - [path-remapping](examples/path-remapping/) - jubako タグによるパスリマッピング（絶対/相対パス、slice/map 対応）
 - [custom-decoder](examples/custom-decoder/) - mapstructure を使ったカスタムデコーダー
+- [sensitive-masking](examples/sensitive-masking/) - センシティブデータの取り扱い（フィールド指定、レイヤー保護、値のマスキング）
 
 ## コアコンセプト
+
+### データフロー
+
+以下の図は、Jubako における設定データの流れを示しています：
+
+```mermaid
+flowchart TB
+    subgraph Step1["Step 1: ソースから読み込み"]
+        SRC1["source/fs, source/bytes, source/aws"]
+        BYTES1["[]byte"]
+        SRC1 --> BYTES1
+    end
+
+    subgraph Step2["Step 2: フォーマットでパース"]
+        FMT["format/yaml, format/toml, format/json, ..."]
+        MAP1["map[string]any"]
+        BYTES1 --> FMT --> MAP1
+    end
+
+    subgraph Step3["Step 3: レイヤースタック（レイヤーごとの map）"]
+        direction BT
+        L1["Priority 0: defaults<br/>{server: {host: localhost, port: 8080}}"]
+        L2["Priority 10: user<br/>{server: {port: 9000}}"]
+        L3["Priority 30: env<br/>{server: {host: prod.example.com}}"]
+        L1 --- L2 --- L3
+    end
+
+    subgraph Step4["Step 4: マップをマージ"]
+        MERGED["merged map[string]any<br/>{server: {host: prod.example.com, port: 9000}}"]
+    end
+
+    subgraph Step5["Step 5: アクセス"]
+        DECODE["構造体 T へデコード<br/>(WithDecoder)"]
+        PATH["JSONPointer でパスアクセス<br/>GetAt, SetTo, Walk"]
+    end
+
+    MAP1 --> Step3
+    L1 & L2 & L3 --> MERGED
+    MERGED --> DECODE
+    MERGED --> PATH
+```
+
+#### ステップバイステップの例
+
+**1. ソースから読み込み**
+
+各 Source がバックエンドから生のバイト列を読み込みます：
+
+```
+defaults.yaml (source/bytes)     user.yaml (source/fs)         APP_SERVER_HOST (layer/env)
+─────────────────────────────    ─────────────────────────     ─────────────────────────────
+server:                          server:                        APP_SERVER_HOST=prod.example.com
+  host: localhost                  port: 9000
+  port: 8080
+```
+
+**2. フォーマットでパース**
+
+各フォーマット実装（`format/yaml`、`format/json` など）がバイト列を `map[string]any` に変換します：
+
+```go
+// defaults.yaml → map[string]any
+{"server": {"host": "localhost", "port": 8080}}
+
+// user.yaml → map[string]any
+{"server": {"port": 9000}}
+
+// env vars → map[string]any
+{"server": {"host": "prod.example.com"}}
+```
+
+**3. レイヤースタック**
+
+マップが優先度順にスタックされます（低い = ベース、高い = 上書き）：
+
+```
+┌─────────────────────────────────────────┐
+│ Priority 30: env                        │  ← 最高（優先）
+│ {"server": {"host": "prod.example.com"}}│
+├─────────────────────────────────────────┤
+│ Priority 10: user                       │
+│ {"server": {"port": 9000}}              │
+├─────────────────────────────────────────┤
+│ Priority 0: defaults                    │  ← 最低（ベース）
+│ {"server": {"host": "localhost",        │
+│             "port": 8080}}              │
+└─────────────────────────────────────────┘
+```
+
+**4. マップをマージ**
+
+優先度の高い値が低い値を上書きします（ディープマージ）：
+
+```go
+// マージ結果
+{"server": {"host": "prod.example.com", "port": 9000}}
+//                   ↑ env (P:30) から         ↑ user (P:10) から
+```
+
+**5. 設定へのアクセス**
+
+マージされたマップには2つの方法でアクセスできます：
+
+**A) 構造体へデコード**（`WithDecoder` 使用、デフォルト: `encoding/json`）
+
+```go
+type Config struct {
+    Server ServerConfig `json:"server"`  // ← json タグでフィールドマッピング
+}
+type ServerConfig struct {
+    Host string `json:"host"`
+    Port int    `json:"port"`
+}
+
+config := store.Get()  // Config{Server: {Host: "prod.example.com", Port: 9000}}
+```
+
+**B) JSONPointer でパスアクセス**（`WithTagName` 使用、デフォルト: `json`）
+
+```go
+// JSONPointer パスは json タグ名から構築される
+store.GetAt("/server/host")  // → "prod.example.com"
+store.GetAt("/server/port")  // → 9000
+store.SetTo("user", "/server/port", 8000)
+```
+
+**C) センシティブフィールドの保護**（`jubako:"sensitive"` タグと `WithSensitive()` 使用）
+
+センシティブフィールドはレイヤー間の混入から保護されます：
+
+```go
+type Config struct {
+    Server      ServerConfig `json:"server"`
+    Credentials Credentials  `json:"credentials" jubako:"sensitive"` // ← センシティブな構造体
+}
+type Credentials struct {
+    APIKey    string `json:"api_key"`                       // センシティブ（継承）
+    PublicKey string `json:"public_key" jubako:"!sensitive"` // オプトアウト
+}
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      書き込みバリデーション (SetTo)                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  フィールド種別  │  通常レイヤー            │  センシティブレイヤー            │
+│                │  (デフォルト)            │  (WithSensitive())            │
+├────────────────┼────────────────────────┼───────────────────────────────┤
+│  通常フィールド  │  ✓ 許可                │  ✗ ErrNormalFieldToSensitive  │
+│  センシティブ    │  ✗ ErrSensitiveToNormal│  ✓ 許可                       │
+└────────────────┴────────────────────────┴───────────────────────────────┘
+```
+
+```go
+// レイヤー設定
+store.Add(layer.New("config", ...), jubako.WithPriority(0))           // 通常レイヤー
+store.Add(layer.New("secrets", ...), jubako.WithSensitive())          // センシティブレイヤー
+
+// 書き込み操作
+store.SetTo("config", "/server/port", 9000)           // ✓ 通常 → 通常
+store.SetTo("secrets", "/credentials/api_key", "key") // ✓ センシティブ → センシティブ
+store.SetTo("config", "/credentials/api_key", "key")  // ✗ エラー: センシティブ → 通常
+store.SetTo("secrets", "/server/port", 9000)          // ✗ エラー: 通常 → センシティブ
+```
+
+完全な使用例は [examples/sensitive-masking](examples/sensitive-masking/) を参照してください。
+
+#### オプションの効果
+
+各オプションは特定のステージで効果を発揮します：
+
+| オプション | 種別 | ステージ | 効果 |
+|---------|------|--------|-----|
+| `WithPriority()` | Add | レイヤースタック | レイヤーのマージ順序を設定 |
+| `WithReadOnly()` | Add | SetTo | レイヤーへの変更を禁止 |
+| `WithSensitive()` | Add | SetTo | センシティブデータ専用レイヤーとしてマーク |
+| `WithTagDelimiter()` | Store | パスリマッピング | jubako タグのデリミタ（デフォルト: `,`） |
+| `WithTagName()` | Store | パスアクセス | JSONPointer パス解決に使用するタグ（デフォルト: `json`） |
+| `WithDecoder()` | Store | 構造体へデコード | カスタム map→struct デコーダー（デフォルト: `encoding/json`） |
+| `WithSensitiveMask()` | Store | GetAt/Walk | センシティブフィールドの値をマスク |
+
+**補足:**
+- `WithTagName` は `GetAt`、`Walk`、`SetTo`、およびセンシティブ判定のパス解決に影響します。
+  デコーダー（デフォルト: JSON）は独自のタグを使用します。
+- `WithSensitive` は書き込み保護を有効にします：センシティブフィールドはセンシティブレイヤーにのみ、
+  通常フィールドは通常レイヤーにのみ書き込めます。
 
 ### レイヤー
 

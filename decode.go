@@ -12,6 +12,27 @@ import (
 
 const tagName = "jubako"
 
+// DefaultTagDelimiter is the default delimiter used to separate path and directives
+// in jubako struct tags. This can be changed via WithTagDelimiter option.
+const DefaultTagDelimiter = ","
+
+// DefaultFieldTagName is the default struct tag name used for field name resolution.
+// This follows the same convention as encoding/json.
+const DefaultFieldTagName = "json"
+
+// sensitiveState represents the sensitivity state of a field.
+type sensitiveState int
+
+const (
+	// sensitiveInherit means the field inherits sensitivity from its parent.
+	sensitiveInherit sensitiveState = iota
+	// sensitiveExplicit means the field is explicitly marked as sensitive.
+	sensitiveExplicit
+	// sensitiveExplicitNot means the field is explicitly marked as NOT sensitive,
+	// overriding any inherited sensitivity.
+	sensitiveExplicitNot
+)
+
 // MapDecoder is a function that decodes a map[string]any into a target struct.
 // See decoder.Func for the function signature.
 // The default implementation is decoder.JSON.
@@ -30,24 +51,37 @@ type PathMapping struct {
 	// Relative paths are resolved from the current element context (e.g., in slices/maps).
 	// Absolute paths (starting with "/") are resolved from the root.
 	IsRelative bool
+	// Sensitive indicates whether this field contains sensitive data.
+	// Used to prevent cross-contamination between sensitive and non-sensitive layers.
+	Sensitive sensitiveState
 }
 
 // MappingTable holds all path mappings for a struct type.
 // Built once at Store initialization, used during every materialize.
 type MappingTable struct {
-	// Mappings contains direct field mappings at this level.
-	Mappings []PathMapping
+	// Mappings contains direct field mappings at this level (for iteration).
+	// Use MappingByKey for O(1) lookup by field key.
+	Mappings []*PathMapping
+	// MappingByKey provides O(1) lookup of PathMapping by JSON field key.
+	// Points to the same PathMapping instances as Mappings slice.
+	MappingByKey map[string]*PathMapping
 	// Nested contains mapping tables for nested struct fields (key = JSON key).
 	Nested map[string]*MappingTable
 	// SliceElement contains mapping table for slice element type (if slice of structs).
 	SliceElement map[string]*MappingTable
 	// MapValue contains mapping table for map value type (if map with struct values).
 	MapValue map[string]*MappingTable
+
+	// sensitive is the sensitivity state of this table's struct itself.
+	// Used for inheriting sensitivity to nested fields.
+	sensitive sensitiveState
 }
 
 // buildMappingTable creates a mapping table for the given struct type.
 // This is called once during Store initialization.
-func buildMappingTable(t reflect.Type) *MappingTable {
+// The delimiter is used to separate path and directives in jubako struct tags.
+// The fieldTagName specifies which struct tag to use for field name resolution (e.g., "json", "yaml").
+func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *MappingTable {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
@@ -56,7 +90,8 @@ func buildMappingTable(t reflect.Type) *MappingTable {
 	}
 
 	table := &MappingTable{
-		Mappings:     make([]PathMapping, 0),
+		Mappings:     make([]*PathMapping, 0),
+		MappingByKey: make(map[string]*PathMapping),
 		Nested:       make(map[string]*MappingTable),
 		SliceElement: make(map[string]*MappingTable),
 		MapValue:     make(map[string]*MappingTable),
@@ -70,8 +105,8 @@ func buildMappingTable(t reflect.Type) *MappingTable {
 			continue
 		}
 
-		jsonKey := getJSONKey(field)
-		if jsonKey == "-" {
+		fieldKey := getFieldKey(field, fieldTagName)
+		if fieldKey == "-" {
 			continue
 		}
 
@@ -79,18 +114,23 @@ func buildMappingTable(t reflect.Type) *MappingTable {
 		tag, hasTag := field.Tag.Lookup(tagName)
 		if hasTag {
 			if tag == "-" {
-				table.Mappings = append(table.Mappings, PathMapping{
-					FieldKey: jsonKey,
+				m := &PathMapping{
+					FieldKey: fieldKey,
 					Skipped:  true,
-				})
+				}
+				table.Mappings = append(table.Mappings, m)
+				table.MappingByKey[fieldKey] = m
 			} else {
-				path, isRelative := parseJubakoTag(tag)
-				if path != "" {
-					table.Mappings = append(table.Mappings, PathMapping{
-						FieldKey:   jsonKey,
+				path, isRelative, sensitive := parseJubakoTag(tag, delimiter)
+				if path != "" || sensitive != sensitiveInherit {
+					m := &PathMapping{
+						FieldKey:   fieldKey,
 						SourcePath: path,
 						IsRelative: isRelative,
-					})
+						Sensitive:  sensitive,
+					}
+					table.Mappings = append(table.Mappings, m)
+					table.MappingByKey[fieldKey] = m
 				}
 			}
 		}
@@ -104,8 +144,8 @@ func buildMappingTable(t reflect.Type) *MappingTable {
 		switch fieldType.Kind() {
 		case reflect.Struct:
 			// Recursively build mapping table for nested struct
-			if nested := buildMappingTable(fieldType); nested != nil && !nested.IsEmpty() {
-				table.Nested[jsonKey] = nested
+			if nested := buildMappingTable(fieldType, delimiter, fieldTagName); nested != nil && !nested.IsEmpty() {
+				table.Nested[fieldKey] = nested
 			}
 
 		case reflect.Slice, reflect.Array:
@@ -115,8 +155,8 @@ func buildMappingTable(t reflect.Type) *MappingTable {
 				elemType = elemType.Elem()
 			}
 			if elemType.Kind() == reflect.Struct {
-				if elemTable := buildMappingTable(elemType); elemTable != nil && !elemTable.IsEmpty() {
-					table.SliceElement[jsonKey] = elemTable
+				if elemTable := buildMappingTable(elemType, delimiter, fieldTagName); elemTable != nil && !elemTable.IsEmpty() {
+					table.SliceElement[fieldKey] = elemTable
 				}
 			}
 
@@ -127,8 +167,8 @@ func buildMappingTable(t reflect.Type) *MappingTable {
 				valueType = valueType.Elem()
 			}
 			if valueType.Kind() == reflect.Struct {
-				if valueTable := buildMappingTable(valueType); valueTable != nil && !valueTable.IsEmpty() {
-					table.MapValue[jsonKey] = valueTable
+				if valueTable := buildMappingTable(valueType, delimiter, fieldTagName); valueTable != nil && !valueTable.IsEmpty() {
+					table.MapValue[fieldKey] = valueTable
 				}
 			}
 		}
@@ -177,6 +217,84 @@ func (t *MappingTable) IsEmpty() bool {
 		return true
 	}
 	return len(t.Mappings) == 0 && len(t.Nested) == 0 && len(t.SliceElement) == 0 && len(t.MapValue) == 0
+}
+
+// IsSensitive checks if the given JSONPointer path is sensitive.
+// It traverses the mapping table hierarchy and handles sensitivity inheritance.
+func (t *MappingTable) IsSensitive(path string) bool {
+	if t == nil {
+		return false
+	}
+
+	// Parse the path into segments
+	segments, err := jsonptr.Parse(path)
+	if err != nil || len(segments) == 0 {
+		return false
+	}
+
+	return t.isSensitiveRecursive(segments, false)
+}
+
+// isSensitiveRecursive traverses the mapping table to determine sensitivity.
+// parentSensitive indicates if an ancestor was marked sensitive.
+func (t *MappingTable) isSensitiveRecursive(segments []string, parentSensitive bool) bool {
+	if t == nil || len(segments) == 0 {
+		return parentSensitive
+	}
+
+	key := segments[0]
+	remaining := segments[1:]
+
+	// Check if this table itself is marked sensitive (for nested structs)
+	currentSensitive := parentSensitive
+	if t.sensitive == sensitiveExplicit {
+		currentSensitive = true
+	} else if t.sensitive == sensitiveExplicitNot {
+		currentSensitive = false
+	}
+
+	// Look for this key in MappingByKey (O(1) lookup) to check field-level sensitivity
+	if m, ok := t.MappingByKey[key]; ok {
+		// Determine sensitivity for this specific field
+		switch m.Sensitive {
+		case sensitiveExplicit:
+			currentSensitive = true
+		case sensitiveExplicitNot:
+			currentSensitive = false
+			// sensitiveInherit: keep currentSensitive
+		}
+	}
+
+	// If no more segments, return current sensitivity
+	if len(remaining) == 0 {
+		return currentSensitive
+	}
+
+	// Look for nested table
+	if nested, ok := t.Nested[key]; ok {
+		return nested.isSensitiveRecursive(remaining, currentSensitive)
+	}
+
+	// Check slice element (for paths like /items/0/field)
+	if elemTable, ok := t.SliceElement[key]; ok {
+		// Skip the index segment (e.g., "0") and continue with the rest
+		if len(remaining) > 1 {
+			return elemTable.isSensitiveRecursive(remaining[1:], currentSensitive)
+		}
+		return currentSensitive
+	}
+
+	// Check map value (for paths like /settings/key/field)
+	if valueTable, ok := t.MapValue[key]; ok {
+		// Skip the key segment and continue with the rest
+		if len(remaining) > 1 {
+			return valueTable.isSensitiveRecursive(remaining[1:], currentSensitive)
+		}
+		return currentSensitive
+	}
+
+	// No nested table found, return inherited sensitivity
+	return currentSensitive
 }
 
 // applyMappings applies the mapping table to transform the source map.
@@ -263,10 +381,15 @@ func applyMappingsWithRoot(root, src map[string]any, table *MappingTable) map[st
 	return dst
 }
 
-// getJSONKey returns the JSON key for a struct field.
-// Uses the json tag if present, otherwise the field name.
-func getJSONKey(field reflect.StructField) string {
-	tag := field.Tag.Get("json")
+// getFieldKey returns the field key for a struct field based on the specified tag name.
+// This follows the same convention as encoding/json:
+// - If the specified tag exists and has a key, that key is used
+// - Otherwise, the struct field name is used as-is
+//
+// The tag value is split by comma and the first segment is used as the key,
+// matching the behavior of encoding/json and similar libraries.
+func getFieldKey(field reflect.StructField, tagName string) string {
+	tag := field.Tag.Get(tagName)
 	if tag == "" {
 		return field.Name
 	}
@@ -277,36 +400,69 @@ func getJSONKey(field reflect.StructField) string {
 	return key
 }
 
-// parseJubakoTag extracts the path and relative flag from a jubako tag.
+// parseJubakoTag extracts the path, relative flag, and sensitivity state from a jubako tag.
 //
 // Path formats:
 //   - "/path/to/value" - absolute path from root
 //   - "path/to/value"  - relative path from current context
 //   - "./path/to/value" - relative path (explicit, "./" is stripped)
 //
-// Options can be appended after comma (future: omitempty, default, etc.)
-func parseJubakoTag(tag string) (path string, isRelative bool) {
-	// Handle options (future: omitempty, default, etc.)
-	if idx := strings.Index(tag, ","); idx >= 0 {
-		tag = tag[:idx]
+// Directives (delimiter-separated, default ","):
+//   - "sensitive" - marks field as containing sensitive data
+//   - "!sensitive" - explicitly marks field as NOT sensitive (overrides inheritance)
+//
+// Examples (with default delimiter ","):
+//   - `jubako:"sensitive"` - sensitive field, no path remap
+//   - `jubako:"/path,sensitive"` - sensitive field with absolute path remap
+//   - `jubako:"!sensitive"` - explicitly non-sensitive (opts out of inherited sensitivity)
+//
+// For config files with commas in key names, use WithTagDelimiter to change the delimiter:
+//   - With delimiter ";": `jubako:"/path,with,commas;sensitive"`
+func parseJubakoTag(tag string, delimiter string) (path string, isRelative bool, sensitive sensitiveState) {
+	sensitive = sensitiveInherit
+
+	// Split by delimiter to get path and directives
+	parts := strings.Split(tag, delimiter)
+	pathPart := ""
+	if len(parts) > 0 {
+		pathPart = strings.TrimSpace(parts[0])
+	}
+
+	// Parse directives
+	for i := 1; i < len(parts); i++ {
+		directive := strings.TrimSpace(parts[i])
+		switch directive {
+		case "sensitive":
+			sensitive = sensitiveExplicit
+		case "!sensitive":
+			sensitive = sensitiveExplicitNot
+		}
+	}
+
+	// Check if first part is just a directive (no path)
+	switch pathPart {
+	case "sensitive":
+		return "", false, sensitiveExplicit
+	case "!sensitive":
+		return "", false, sensitiveExplicitNot
 	}
 
 	// Check for explicit relative prefix
-	if strings.HasPrefix(tag, "./") {
-		return "/" + tag[2:], true // Convert "./foo" to "/foo" for JSONPointer
+	if strings.HasPrefix(pathPart, "./") {
+		return "/" + pathPart[2:], true, sensitive // Convert "./foo" to "/foo" for JSONPointer
 	}
 
 	// Absolute paths start with "/"
-	if strings.HasPrefix(tag, "/") {
-		return tag, false
+	if strings.HasPrefix(pathPart, "/") {
+		return pathPart, false, sensitive
 	}
 
 	// No leading "/" means relative path
-	if tag != "" {
-		return "/" + tag, true // Prepend "/" for JSONPointer format
+	if pathPart != "" {
+		return "/" + pathPart, true, sensitive // Prepend "/" for JSONPointer format
 	}
 
-	return tag, false
+	return pathPart, false, sensitive
 }
 
 // parseJSONTagKey extracts the key name from a json tag.

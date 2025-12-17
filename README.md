@@ -17,6 +17,7 @@ items, and together they form a complete set - much like how this library manage
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
+    - [Data Flow](#data-flow)
     - [Layers](#layers)
     - [JSON Pointer (RFC 6901)](#json-pointer-rfc-6901)
     - [Config Struct Definition](#config-struct-definition)
@@ -165,8 +166,195 @@ For complete working examples, see the [examples/](examples/) directory:
 - [origin-tracking](examples/origin-tracking/) - Detailed origin tracking features
 - [path-remapping](examples/path-remapping/) - Path remapping with jubako struct tags (absolute/relative paths, slice/map support)
 - [custom-decoder](examples/custom-decoder/) - Using mapstructure as a custom decoder
+- [sensitive-masking](examples/sensitive-masking/) - Sensitive data handling (field marking, layer protection, value masking)
 
 ## Core Concepts
+
+### Data Flow
+
+The following diagram shows how configuration data flows through Jubako:
+
+```mermaid
+flowchart TB
+    subgraph Step1["Step 1: Load from Sources"]
+        SRC1["source/fs, source/bytes, source/aws"]
+        BYTES1["[]byte"]
+        SRC1 --> BYTES1
+    end
+
+    subgraph Step2["Step 2: Parse with Format"]
+        FMT["format/yaml, format/toml, format/json, ..."]
+        MAP1["map[string]any"]
+        BYTES1 --> FMT --> MAP1
+    end
+
+    subgraph Step3["Step 3: Layer Stack (per-layer maps)"]
+        direction BT
+        L1["Priority 0: defaults<br/>{server: {host: localhost, port: 8080}}"]
+        L2["Priority 10: user<br/>{server: {port: 9000}}"]
+        L3["Priority 30: env<br/>{server: {host: prod.example.com}}"]
+        L1 --- L2 --- L3
+    end
+
+    subgraph Step4["Step 4: Merge Maps"]
+        MERGED["merged map[string]any<br/>{server: {host: prod.example.com, port: 9000}}"]
+    end
+
+    subgraph Step5["Step 5: Access"]
+        DECODE["Decode to Struct T<br/>(WithDecoder)"]
+        PATH["Path Access via JSONPointer<br/>GetAt, SetTo, Walk"]
+    end
+
+    MAP1 --> Step3
+    L1 & L2 & L3 --> MERGED
+    MERGED --> DECODE
+    MERGED --> PATH
+```
+
+#### Step-by-Step Example
+
+**1. Load from Sources**
+
+Each Source reads raw bytes from its backend:
+
+```
+defaults.yaml (source/bytes)     user.yaml (source/fs)         APP_SERVER_HOST (layer/env)
+─────────────────────────────    ─────────────────────────     ─────────────────────────────
+server:                          server:                        APP_SERVER_HOST=prod.example.com
+  host: localhost                  port: 9000
+  port: 8080
+```
+
+**2. Parse with Format**
+
+Each format implementation (`format/yaml`, `format/json`, etc.) converts bytes to `map[string]any`:
+
+```go
+// defaults.yaml → map[string]any
+{"server": {"host": "localhost", "port": 8080}}
+
+// user.yaml → map[string]any
+{"server": {"port": 9000}}
+
+// env vars → map[string]any
+{"server": {"host": "prod.example.com"}}
+```
+
+**3. Layer Stack**
+
+Maps are stacked by priority (lower = base, higher = override):
+
+```
+┌─────────────────────────────────────────┐
+│ Priority 30: env                        │  ← highest (wins)
+│ {"server": {"host": "prod.example.com"}}│
+├─────────────────────────────────────────┤
+│ Priority 10: user                       │
+│ {"server": {"port": 9000}}              │
+├─────────────────────────────────────────┤
+│ Priority 0: defaults                    │  ← lowest (base)
+│ {"server": {"host": "localhost",        │
+│             "port": 8080}}              │
+└─────────────────────────────────────────┘
+```
+
+**4. Merge Maps**
+
+Higher priority values override lower priority (deep merge):
+
+```go
+// Merged result
+{"server": {"host": "prod.example.com", "port": 9000}}
+//                   ↑ from env (P:30)         ↑ from user (P:10)
+```
+
+**5. Access the Configuration**
+
+The merged map can be accessed in two ways:
+
+**A) Decode to Struct** (using `WithDecoder`, default: `encoding/json`)
+
+```go
+type Config struct {
+    Server ServerConfig `json:"server"`  // ← json tag determines field mapping
+}
+type ServerConfig struct {
+    Host string `json:"host"`
+    Port int    `json:"port"`
+}
+
+config := store.Get()  // Config{Server: {Host: "prod.example.com", Port: 9000}}
+```
+
+**B) Path Access via JSONPointer** (using `WithTagName`, default: `json`)
+
+```go
+// JSONPointer paths are built from json tag names
+store.GetAt("/server/host")  // → "prod.example.com"
+store.GetAt("/server/port")  // → 9000
+store.SetTo("user", "/server/port", 8000)
+```
+
+**C) Sensitive Field Protection** (using `jubako:"sensitive"` tag and `WithSensitive()`)
+
+Sensitive fields are protected from cross-contamination between layers:
+
+```go
+type Config struct {
+    Server      ServerConfig `json:"server"`
+    Credentials Credentials  `json:"credentials" jubako:"sensitive"` // ← sensitive struct
+}
+type Credentials struct {
+    APIKey    string `json:"api_key"`                       // sensitive (inherited)
+    PublicKey string `json:"public_key" jubako:"!sensitive"` // opt-out
+}
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Write Validation (SetTo)                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Field Type    │  Normal Layer          │  Sensitive Layer              │
+│                │  (default)             │  (WithSensitive())            │
+├────────────────┼────────────────────────┼───────────────────────────────┤
+│  Normal field  │  ✓ Allowed             │  ✗ ErrNormalFieldToSensitive  │
+│  Sensitive     │  ✗ ErrSensitiveToNormal│  ✓ Allowed                    │
+└────────────────┴────────────────────────┴───────────────────────────────┘
+```
+
+```go
+// Layer setup
+store.Add(layer.New("config", ...), jubako.WithPriority(0))           // normal layer
+store.Add(layer.New("secrets", ...), jubako.WithSensitive())          // sensitive layer
+
+// Write operations
+store.SetTo("config", "/server/port", 9000)       // ✓ normal → normal
+store.SetTo("secrets", "/credentials/api_key", "key") // ✓ sensitive → sensitive
+store.SetTo("config", "/credentials/api_key", "key")  // ✗ ERROR: sensitive → normal
+store.SetTo("secrets", "/server/port", 9000)          // ✗ ERROR: normal → sensitive
+```
+
+See [examples/sensitive-masking](examples/sensitive-masking/) for a complete example.
+
+#### Option Effects
+
+Each option affects a specific stage:
+
+| Option | Type | Stage | Effect |
+|--------|------|-------|--------|
+| `WithPriority()` | Add | Layer Stack | Sets layer merge order |
+| `WithReadOnly()` | Add | SetTo | Prevents modifications to layer |
+| `WithSensitive()` | Add | SetTo | Marks layer for sensitive data only |
+| `WithTagDelimiter()` | Store | Path Remapping | Delimiter for jubako tag parsing (default: `,`) |
+| `WithTagName()` | Store | Path Access | Struct tag for JSONPointer path resolution (default: `json`) |
+| `WithDecoder()` | Store | Decode to Struct | Custom map→struct decoder (default: `encoding/json`) |
+| `WithSensitiveMask()` | Store | GetAt/Walk | Masks sensitive field values |
+
+**Notes:**
+- `WithTagName` affects path resolution for `GetAt`, `Walk`, `SetTo`, and sensitivity checking.
+  The decoder (default: JSON) uses its own tag independently.
+- `WithSensitive` enables write protection: sensitive fields can only be written to sensitive layers,
+  and normal fields can only be written to normal layers.
 
 ### Layers
 

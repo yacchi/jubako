@@ -58,6 +58,11 @@ type LayerInfo interface {
 
 	// NoWatch returns whether watching is disabled for this layer.
 	NoWatch() bool
+
+	// Sensitive returns whether the layer is marked as containing sensitive data.
+	// Sensitive layers can only contain sensitive fields, and sensitive fields
+	// can only be written to sensitive layers.
+	Sensitive() bool
 }
 
 // AddOption is a functional option for configuring layer addition.
@@ -69,6 +74,7 @@ type addOptions struct {
 	hasPriority bool
 	readOnly    bool
 	noWatch     bool
+	sensitive   bool
 }
 
 // WithPriority sets a specific priority for the layer.
@@ -100,6 +106,17 @@ func WithNoWatch() AddOption {
 	}
 }
 
+// WithSensitive marks the layer as containing sensitive data.
+// Sensitive layers can only accept writes to fields marked with `jubako:"sensitive"` tag.
+// Conversely, fields marked as sensitive can only be written to sensitive layers.
+// This prevents cross-contamination of sensitive data (e.g., credentials) with
+// regular configuration data.
+func WithSensitive() AddOption {
+	return func(o *addOptions) {
+		o.sensitive = true
+	}
+}
+
 // layerEntry holds a layer with its priority for internal use.
 // It implements LayerInfo interface to avoid allocating new structs during traversal.
 type layerEntry struct {
@@ -114,6 +131,9 @@ type layerEntry struct {
 
 	// noWatch indicates whether watching is disabled for this layer
 	noWatch bool
+
+	// sensitive indicates whether the layer contains sensitive data
+	sensitive bool
 
 	// dirty indicates whether the layer has been modified but not yet saved
 	dirty bool
@@ -177,6 +197,11 @@ func (e *layerEntry) NoWatch() bool {
 	return e.noWatch
 }
 
+// Sensitive returns whether the layer is marked as containing sensitive data.
+func (e *layerEntry) Sensitive() bool {
+	return e.sensitive
+}
+
 // findLayerLocked finds a layer by name.
 // Returns nil if the layer is not found.
 // Caller must hold the lock (read or write).
@@ -194,8 +219,11 @@ type StoreOption func(*storeOptions)
 
 // storeOptions holds the options for New.
 type storeOptions struct {
-	priorityStep int
-	decoder      MapDecoder
+	priorityStep  int
+	decoder       MapDecoder
+	sensitiveMask SensitiveMaskFunc
+	tagDelimiter  string
+	tagName       string
 }
 
 // defaultPriorityStep is the default step size for auto-assigned priorities.
@@ -228,6 +256,86 @@ func WithDecoder(decoder MapDecoder) StoreOption {
 	}
 }
 
+// WithSensitiveMask sets a custom mask handler for sensitive fields.
+// When sensitive fields are accessed through GetAt or Walk, the mask function
+// is called to transform the value before returning it.
+//
+// Use GetAtUnmasked to retrieve the original unmasked value when needed.
+//
+// Example:
+//
+//	store := jubako.New[Config](jubako.WithSensitiveMask(func(value any) any {
+//	    if s, ok := value.(string); ok {
+//	        if len(s) > 4 {
+//	            return s[:2] + "****" + s[len(s)-2:]
+//	        }
+//	    }
+//	    return "****"
+//	}))
+func WithSensitiveMask(fn SensitiveMaskFunc) StoreOption {
+	return func(o *storeOptions) {
+		o.sensitiveMask = fn
+	}
+}
+
+// WithSensitiveMaskString sets a fixed mask string for sensitive fields.
+// This is a convenience wrapper around WithSensitiveMask that returns a constant string.
+//
+// Example:
+//
+//	store := jubako.New[Config](jubako.WithSensitiveMaskString("[REDACTED]"))
+func WithSensitiveMaskString(mask string) StoreOption {
+	return func(o *storeOptions) {
+		o.sensitiveMask = func(any) any {
+			return mask
+		}
+	}
+}
+
+// WithTagDelimiter sets a custom delimiter for separating path and directives
+// in jubako struct tags. The default delimiter is "," (comma).
+//
+// Use this option when your configuration keys contain commas and you need
+// to map to paths containing those commas.
+//
+// Example:
+//
+//	// Default: `jubako:"/path,sensitive"` means path="/path" + directive="sensitive"
+//	store := jubako.New[Config]()
+//
+//	// With semicolon delimiter: `jubako:"/path,with,commas;sensitive"`
+//	// means path="/path,with,commas" + directive="sensitive"
+//	store := jubako.New[Config](jubako.WithTagDelimiter(";"))
+func WithTagDelimiter(delimiter string) StoreOption {
+	return func(o *storeOptions) {
+		o.tagDelimiter = delimiter
+	}
+}
+
+// WithTagName sets the struct tag name used for field name resolution.
+// The default is "json", following the same convention as encoding/json.
+//
+// This is useful when using custom decoders that expect different tag names
+// (e.g., "yaml", "toml", "mapstructure").
+//
+// The tag value is parsed the same way as encoding/json: split by comma,
+// and the first segment is used as the field name.
+//
+// Example:
+//
+//	// Default: uses json tag
+//	store := jubako.New[Config]()
+//	// Field `Server ServerConfig `json:"server"`` is accessed via "/server"
+//
+//	// With yaml tag
+//	store := jubako.New[Config](jubako.WithTagName("yaml"))
+//	// Field `Server ServerConfig `yaml:"server"`` is accessed via "/server"
+func WithTagName(name string) StoreOption {
+	return func(o *storeOptions) {
+		o.tagName = name
+	}
+}
+
 // Store manages multiple configuration layers and provides a materialized view
 // of the merged configuration.
 //
@@ -257,8 +365,12 @@ type Store[T any] struct {
 	decoder MapDecoder
 
 	// mappingTable holds pre-computed path mappings from jubako struct tags
-	// Built once at initialization, used during every materialize
+	// Built once at initialization, used during every materialize and SetTo validation
 	mappingTable *MappingTable
+
+	// sensitiveMask is the function used to mask sensitive values in GetAt and Walk.
+	// If nil, sensitive values are returned as-is.
+	sensitiveMask SensitiveMaskFunc
 
 	// mu protects layers, origins, and subscribers
 	mu sync.RWMutex
@@ -270,6 +382,8 @@ type Store[T any] struct {
 // Options:
 //   - WithPriorityStep(step): Set the step size for auto-assigned priorities (default: 10)
 //   - WithDecoder(decoder): Set a custom map decoder (default: JSON marshal/unmarshal)
+//   - WithTagDelimiter(delimiter): Set a custom delimiter for jubako struct tags (default: ",")
+//   - WithTagName(name): Set the struct tag name for field resolution (default: "json")
 //
 // Example:
 //
@@ -280,7 +394,9 @@ func New[T any](opts ...StoreOption) *Store[T] {
 	options := storeOptions{
 		priorityStep: defaultPriorityStep,
 		// Set default decoder if not provided
-		decoder: decoder.JSON,
+		decoder:      decoder.JSON,
+		tagDelimiter: DefaultTagDelimiter,
+		tagName:      DefaultFieldTagName,
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -289,17 +405,18 @@ func New[T any](opts ...StoreOption) *Store[T] {
 	var zero T
 
 	// Build mapping table from T's struct tags at initialization time
-	table := buildMappingTable(reflect.TypeOf(zero))
+	table := buildMappingTable(reflect.TypeOf(zero), options.tagDelimiter, options.tagName)
 
 	return &Store[T]{
-		layers:       make([]*layerEntry, 0),
-		resolved:     NewCell(zero),
-		origins:      newOrigins(),
-		subscribers:  make([]subscriber[T], 0),
-		nextSubID:    1,
-		priorityStep: options.priorityStep,
-		decoder:      options.decoder,
-		mappingTable: table,
+		layers:        make([]*layerEntry, 0),
+		resolved:      NewCell(zero),
+		origins:       newOrigins(),
+		subscribers:   make([]subscriber[T], 0),
+		nextSubID:     1,
+		priorityStep:  options.priorityStep,
+		decoder:       options.decoder,
+		mappingTable:  table,
+		sensitiveMask: options.sensitiveMask,
 	}
 }
 
@@ -344,10 +461,11 @@ func (s *Store[T]) Add(l layer.Layer, opts ...AddOption) error {
 	}
 
 	entry := &layerEntry{
-		layer:    l,
-		priority: priority,
-		readOnly: options.readOnly,
-		noWatch:  options.noWatch,
+		layer:     l,
+		priority:  priority,
+		readOnly:  options.readOnly,
+		noWatch:   options.noWatch,
+		sensitive: options.sensitive,
 	}
 
 	// Populate layer details (Layer interface includes DetailsFiller)
@@ -585,6 +703,12 @@ func (s *Store[T]) setToLocked(layerName layer.Name, path string, value any) (T,
 		return zero, nil, fmt.Errorf("layer %q has not been loaded", layerName)
 	}
 
+	// Validate sensitivity: ensure sensitive fields only go to sensitive layers and vice versa
+	if err := validateSensitivity(s.mappingTable, path, entry.sensitive); err != nil {
+		var zero T
+		return zero, nil, fmt.Errorf("%w: path %s, layer %s", err, path, layerName)
+	}
+
 	// Set the value in the data map using jsonptr.SetPath
 	// SetResult tells us whether this was a create (add) or update (replace) operation
 	result := jsonptr.SetPath(entry.data, path, value)
@@ -728,6 +852,10 @@ func (s *Store[T]) GetLayer(name layer.Name) layer.Layer {
 // For container values (maps/slices), the merged value from all layers is returned,
 // and the origin is the highest priority layer that has a value at that path.
 //
+// If the path points to a sensitive field and masking is enabled (via WithSensitiveMask
+// or WithSensitiveMaskString), the returned value will be masked and Masked will be true.
+// Use GetAtUnmasked to retrieve the original value.
+//
 // Example:
 //
 //	rv := store.GetAt("/server/port")
@@ -738,7 +866,47 @@ func (s *Store[T]) GetAt(path string) ResolvedValue {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	rv := s.getAtLocked(path)
+	return s.applyMaskLocked(rv, path)
+}
+
+// GetAtUnmasked returns the resolved value at the given JSON Pointer path
+// without applying sensitive masking. Use this when you need the actual value
+// for processing (not for display or logging).
+//
+// Example:
+//
+//	// For display (masked)
+//	rv := store.GetAt("/credentials/password")
+//	fmt.Printf("Password: %v\n", rv.Value) // Prints: Password: ********
+//
+//	// For actual use (unmasked)
+//	rv = store.GetAtUnmasked("/credentials/password")
+//	authenticate(rv.Value.(string)) // Uses actual password
+func (s *Store[T]) GetAtUnmasked(path string) ResolvedValue {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	return s.getAtLocked(path)
+}
+
+// applyMaskLocked applies sensitive masking to a ResolvedValue if needed.
+// Caller must hold the lock.
+func (s *Store[T]) applyMaskLocked(rv ResolvedValue, path string) ResolvedValue {
+	// No masking if no mask function configured or value doesn't exist
+	if s.sensitiveMask == nil || !rv.Exists {
+		return rv
+	}
+
+	// Check if path is sensitive
+	if !s.mappingTable.IsSensitive(path) {
+		return rv
+	}
+
+	// Apply masking
+	rv.Value = s.sensitiveMask(rv.Value)
+	rv.Masked = true
+	return rv
 }
 
 // getAtLocked returns the resolved value at path. Caller must hold the lock.
@@ -888,8 +1056,10 @@ func (s *Store[T]) Walk(fn func(ctx WalkContext) bool) {
 	for _, path := range paths {
 		orig := s.origins.leafs[path]
 		ctx := WalkContext{
-			Path:   path,
-			origin: orig,
+			Path:      path,
+			origin:    orig,
+			maskFunc:  s.sensitiveMask,
+			sensitive: s.mappingTable.IsSensitive(path),
 		}
 
 		if !fn(ctx) {
