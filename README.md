@@ -1068,8 +1068,9 @@ func main() {
 }
 ```
 
-**Note**: Environment variables are always read as strings. For numeric fields,
-consider using them in combination with YAML layers.
+**Note**: Environment variables are always read as strings. However, by using JSON Pointer paths with numeric segments (e.g., `APP_ITEMS_0`, `APP_SERVERS_0_HOST`), array structures can be created. For explicit type conversions (e.g., string "8080" to int 8080), you can use a custom `TransformFunc`.
+
+This also applies to numeric fields; `jsonptr` will attempt to convert numeric path segments to array indices. If you need explicit type conversion for the *value* (e.g., "8080" to `int 8080`), you can provide a custom `TransformFunc` to perform this.
 
 See [examples/env-override](examples/env-override/) for detailed usage.
 
