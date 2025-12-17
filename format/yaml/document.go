@@ -69,7 +69,7 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 		if m == nil {
 			m = map[string]any{}
 		}
-		return yaml.Marshal(m)
+		return d.marshal(m)
 	}
 
 	// Parse existing data to preserve comments
@@ -119,14 +119,28 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 		}
 	}
 
-	return yaml.Marshal(root)
+	return d.marshal(root)
 }
 
 // MarshalTestData generates YAML bytes from the given data structure.
 // YAML supports all common data structures, so this never returns
 // UnsupportedStructureError.
 func (d *Document) MarshalTestData(data map[string]any) ([]byte, error) {
-	return yaml.Marshal(data)
+	return d.marshal(data)
+}
+
+// marshal encodes data to YAML with standard indentation (2 spaces).
+func (d *Document) marshal(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // getRootMapping returns the root mapping node.
