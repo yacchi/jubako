@@ -23,12 +23,13 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Download dependencies
+      - name: Setup go.work for local development
         run: |
-          go mod download
-          cd format/yaml && go mod download
-          cd ../toml && go mod download
-          cd ../jsonc && go mod download
+          go work init
+          go work use . ./format/yaml ./format/toml ./format/jsonc ./source/aws ./examples
+
+      - name: Download dependencies
+        run: go mod download
 
       - name: Run tests with coverage
         run: |
@@ -68,6 +69,11 @@ jobs:
         with:
           go-version: "1.24"
           cache: true
+
+      - name: Setup go.work for local development
+        run: |
+          go work init
+          go work use . ./format/yaml ./format/toml ./format/jsonc ./source/aws ./examples
 
       - name: Run go vet
         run: |
