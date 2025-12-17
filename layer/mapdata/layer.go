@@ -112,3 +112,9 @@ func (l *Layer) FillDetails(d *types.Details) {
 	d.Format = FormatMapdata
 	d.Watcher = watcher.TypeNoop
 }
+
+// Watch returns a noop LayerWatcher since mapdata layers are in-memory
+// data structures and don't support watching for external changes.
+func (l *Layer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return layer.NewNoopLayerWatcher(), nil
+}

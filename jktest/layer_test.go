@@ -29,6 +29,7 @@ func TestLayerTester_SkipOptions(t *testing.T) {
 	_ = NewLayerTester(t, factory,
 		SkipNullTest("test: null not supported"),
 		SkipArrayTest("test: arrays not supported"),
+		SkipWatchTest("test: watch not supported"),
 	)
 }
 
@@ -55,6 +56,9 @@ func (l *readOnlyLayer) Save(context.Context, document.JSONPatchSet) error {
 	return errors.New("read-only")
 }
 func (l *readOnlyLayer) CanSave() bool { return false }
+func (l *readOnlyLayer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return layer.NewNoopLayerWatcher(), nil
+}
 
 func TestLayerTester_SkipNullAndArrayAndSave(t *testing.T) {
 	t.Run("skip null/array", func(t *testing.T) {
@@ -72,6 +76,15 @@ func TestLayerTester_SkipNullAndArrayAndSave(t *testing.T) {
 			return &readOnlyLayer{data: data}
 		}
 		NewLayerTester(t, factory).TestAll()
+	})
+
+	t.Run("skip watch", func(t *testing.T) {
+		factory := func(data map[string]any) layer.Layer {
+			return mapdata.New("test", data)
+		}
+		NewLayerTester(t, factory,
+			SkipWatchTest("test: watch tests skipped"),
+		).TestAll()
 	})
 }
 

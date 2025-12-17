@@ -10,6 +10,7 @@ import (
 	"github.com/yacchi/jubako/format/json"
 	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 type memSource struct {
@@ -149,4 +150,146 @@ func TestFileLayer_Load_ErrorPaths(t *testing.T) {
 			t.Fatal("Load() expected error, got nil")
 		}
 	})
+}
+
+// Tests for FillDetails branches
+
+// watchableMemSource is a memSource that implements WatchableSource with NoopWatcher.
+type watchableMemSource struct {
+	memSource
+}
+
+func (s *watchableMemSource) Watch() (watcher.WatcherInitializer, error) {
+	return watcher.NewNoop(), nil
+}
+
+var _ source.WatchableSource = (*watchableMemSource)(nil)
+
+// detailsFillerSource is a memSource that implements types.DetailsFiller.
+type detailsFillerSource struct {
+	memSource
+	path string
+}
+
+func (s *detailsFillerSource) FillDetails(d *types.Details) {
+	d.Path = s.path
+}
+
+var _ types.DetailsFiller = (*detailsFillerSource)(nil)
+
+func TestFileLayer_FillDetails_WatchableSource(t *testing.T) {
+	doc := json.New()
+	src := &watchableMemSource{
+		memSource: memSource{data: []byte("{}")},
+	}
+	l := New("test", src, doc)
+
+	details := &types.Details{}
+	l.FillDetails(details)
+
+	// Source type should be set
+	if details.Source != "mem" {
+		t.Errorf("Source = %q, want %q", details.Source, "mem")
+	}
+
+	// Format should be set from document
+	if details.Format != document.FormatJSON {
+		t.Errorf("Format = %q, want %q", details.Format, document.FormatJSON)
+	}
+
+	// Watcher type should be noop (from WatchableSource)
+	if details.Watcher != watcher.TypeNoop {
+		t.Errorf("Watcher = %q, want %q", details.Watcher, watcher.TypeNoop)
+	}
+}
+
+func TestFileLayer_FillDetails_DetailsFiller(t *testing.T) {
+	doc := json.New()
+	src := &detailsFillerSource{
+		memSource: memSource{data: []byte("{}")},
+		path:      "/etc/config.json",
+	}
+	l := New("test", src, doc)
+
+	details := &types.Details{}
+	l.FillDetails(details)
+
+	// Path should be set from source's FillDetails
+	if details.Path != "/etc/config.json" {
+		t.Errorf("Path = %q, want %q", details.Path, "/etc/config.json")
+	}
+}
+
+func TestFileLayer_FillDetails_NonWatchableSource(t *testing.T) {
+	doc := json.New()
+	src := &memSource{data: []byte("{}")}
+	l := New("test", src, doc)
+
+	details := &types.Details{}
+	l.FillDetails(details)
+
+	// Watcher type should be polling (fallback for non-WatchableSource)
+	if details.Watcher != watcher.TypePolling {
+		t.Errorf("Watcher = %q, want %q", details.Watcher, watcher.TypePolling)
+	}
+}
+
+// watchableErrorSource returns an error from Watch.
+type watchableErrorSource struct {
+	memSource
+}
+
+func (s *watchableErrorSource) Watch() (watcher.WatcherInitializer, error) {
+	return nil, errors.New("watch error")
+}
+
+var _ source.WatchableSource = (*watchableErrorSource)(nil)
+
+func TestFileLayer_FillDetails_WatchError(t *testing.T) {
+	doc := json.New()
+	src := &watchableErrorSource{
+		memSource: memSource{data: []byte("{}")},
+	}
+	l := New("test", src, doc)
+
+	details := &types.Details{}
+	l.FillDetails(details)
+
+	// Watcher type should be empty when Watch() returns an error
+	// (but Source and Format should still be set)
+	if details.Source != "mem" {
+		t.Errorf("Source = %q, want %q", details.Source, "mem")
+	}
+	if details.Format != document.FormatJSON {
+		t.Errorf("Format = %q, want %q", details.Format, document.FormatJSON)
+	}
+}
+
+// watchableInitErrorSource returns an initializer that errors.
+type watchableInitErrorSource struct {
+	memSource
+}
+
+func (s *watchableInitErrorSource) Watch() (watcher.WatcherInitializer, error) {
+	return func(params watcher.WatcherInitializerParams) (watcher.Watcher, error) {
+		return nil, errors.New("init error")
+	}, nil
+}
+
+var _ source.WatchableSource = (*watchableInitErrorSource)(nil)
+
+func TestFileLayer_FillDetails_WatchInitError(t *testing.T) {
+	doc := json.New()
+	src := &watchableInitErrorSource{
+		memSource: memSource{data: []byte("{}")},
+	}
+	l := New("test", src, doc)
+
+	details := &types.Details{}
+	l.FillDetails(details)
+
+	// Watcher type should be empty when WatcherInitializer returns an error
+	if details.Watcher != "" {
+		t.Errorf("Watcher = %q, want empty", details.Watcher)
+	}
 }

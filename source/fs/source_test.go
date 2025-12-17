@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yacchi/jubako/types"
+	"github.com/yacchi/jubako/watcher"
 )
 
 func TestExpandTilde(t *testing.T) {
@@ -215,12 +216,24 @@ func TestSource_Watch(t *testing.T) {
 	}
 
 	s := New(target)
-	w, err := s.Watch()
+	init, err := s.Watch()
 	if err != nil {
 		t.Fatalf("Watch() error = %v", err)
 	}
-	if w == nil {
-		t.Fatal("Watch() returned nil watcher")
+	if init == nil {
+		t.Fatal("Watch() returned nil initializer")
+	}
+
+	// Create watcher with test params
+	var mu sync.Mutex
+	w, err := init(watcher.WatcherInitializerParams{
+		Fetch: func(ctx context.Context) (bool, []byte, error) {
+			return true, nil, nil
+		},
+		OpMu: &mu,
+	})
+	if err != nil {
+		t.Fatalf("WatcherInitializer() error = %v", err)
 	}
 
 	// Verify it's a subscription watcher (fs-specific)
@@ -241,11 +254,16 @@ func TestSource_Subscribe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var received []byte
+	// Track event-only notifications (data=nil, err=nil)
+	var notified bool
 	var mu sync.Mutex
 	notify := func(data []byte, err error) {
 		mu.Lock()
-		received = data
+		// With the new design, Subscribe sends event-only notifications (nil, nil)
+		// The subscriber is expected to fetch data separately
+		if data == nil && err == nil {
+			notified = true
+		}
 		mu.Unlock()
 	}
 
@@ -261,23 +279,32 @@ func TestSource_Subscribe(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	// Wait for notification
+	// Wait for event-only notification
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
-		data := received
+		done := notified
 		mu.Unlock()
-		if data != nil {
+		if done {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	mu.Lock()
-	if received == nil {
-		t.Error("expected notification, got none")
+	if !notified {
+		t.Error("expected event-only notification (nil, nil), got none")
 	}
 	mu.Unlock()
+
+	// Verify that Load returns the updated data
+	data, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if string(data) != `{"key": "updated"}` {
+		t.Errorf("Load() = %q, want %q", string(data), `{"key": "updated"}`)
+	}
 }
 
 func TestSource_Subscribe_DirectoryNotFound(t *testing.T) {

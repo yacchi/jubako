@@ -6,9 +6,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
+	"sync"
 	"time"
 
 	"github.com/yacchi/jubako/types"
+)
+
+// Errors for WatcherInitializerParams validation.
+var (
+	// ErrFetchRequired is returned when Fetch is nil in WatcherInitializerParams.
+	ErrFetchRequired = errors.New("watcher: Fetch is required")
+
+	// ErrOpMuRequired is returned when OpMu is nil in WatcherInitializerParams.
+	ErrOpMuRequired = errors.New("watcher: OpMu is required")
 )
 
 // DefaultPollInterval is the default polling interval for change detection.
@@ -51,7 +62,12 @@ type WatchConfig struct {
 	// Only used by PollingWatcher. Default is 30 seconds.
 	PollInterval time.Duration
 
-	// CompareFunc is used to detect changes between old and new data.
+	// CompareFunc is used by PollingWatcher to detect changes between
+	// the previous poll result and the current one. When the poll function
+	// returns changed=true with data, the watcher uses CompareFunc to
+	// determine if the data actually differs from the last known data.
+	// This allows sources to always return changed=true (indicating successful fetch)
+	// while the watcher handles the actual change detection.
 	// Default is DefaultCompareFunc (bytes.Equal).
 	CompareFunc CompareFunc
 }
@@ -93,6 +109,18 @@ func (c *WatchConfig) ApplyOptions(opts ...WatchConfigOption) {
 	}
 }
 
+// ApplyDefaults fills zero/nil values with defaults.
+// This ensures that after all options are applied, the config has valid values.
+// Call this after ApplyOptions to guarantee no zero/nil values remain.
+func (c *WatchConfig) ApplyDefaults() {
+	if c.PollInterval <= 0 {
+		c.PollInterval = DefaultPollInterval
+	}
+	if c.CompareFunc == nil {
+		c.CompareFunc = DefaultCompareFunc
+	}
+}
+
 // WatchResult represents the result of a watch cycle.
 type WatchResult struct {
 	// Data is the latest data from the source.
@@ -105,8 +133,82 @@ type WatchResult struct {
 
 // NotifyFunc is a callback for subscription-based watchers.
 // Called when data changes or an error occurs.
+//
+// The callback follows this convention:
+//   - notify(data, nil): Data is available from the source (push-style).
+//   - notify(nil, err): An error occurred during watching.
+//   - notify(nil, nil): A change was detected but data must be fetched separately.
+//
+// When notify(nil, nil) is called, the subscriber should use FetchFunc to get the data.
 type NotifyFunc func(data []byte, err error)
+
+// FetchFunc fetches the latest data from a source and reports whether it changed.
+// This is a unified function type used by both polling and subscription watchers.
+//
+// Return value semantics:
+//   - (true, data, nil): Data changed and is available.
+//   - (false, nil, nil): No change detected (e.g., 304 Not Modified, same content).
+//   - (false, nil, err): An error occurred.
+//
+// For subscription watchers, when NotifyFunc is called with (nil, nil),
+// the watcher calls FetchFunc to get the data. If FetchFunc returns changed=false,
+// no notification is emitted to downstream consumers.
+type FetchFunc func(ctx context.Context) (changed bool, data []byte, err error)
+
+// WatcherInitializerParams contains parameters for WatcherInitializer.
+// All fields are required and will be validated by the initializer.
+type WatcherInitializerParams struct {
+	// Fetch is a function to fetch the latest data and detect changes.
+	// Used by subscription-based watchers when event-only notification (nil, nil) is received.
+	// Required: must not be nil.
+	Fetch FetchFunc
+
+	// OpMu is a mutex for operation-level synchronization.
+	// Both polling and subscription watchers will wrap their fetch operations with this mutex
+	// to ensure mutual exclusion with Load/Save operations.
+	// Required: must not be nil.
+	OpMu *sync.Mutex
+
+	// Config contains watch configuration (PollInterval, CompareFunc, etc.).
+	// This allows configuration to be finalized at initialization time,
+	// eliminating the need for synchronization in Start().
+	Config WatchConfig
+}
+
+// Validate checks that all required fields are set.
+func (p WatcherInitializerParams) Validate() error {
+	if p.Fetch == nil {
+		return ErrFetchRequired
+	}
+	if p.OpMu == nil {
+		return ErrOpMuRequired
+	}
+	return nil
+}
+
+// WatcherInitializer is a factory function that creates a Watcher.
+// Sources return this from Watch() to defer actual watcher creation to the caller.
+// This allows the caller (typically Layer) to provide synchronized fetch functions
+// and operation mutex without the source needing to know about synchronization details.
+//
+// The params argument contains all required parameters. Implementations should
+// call params.Validate() to ensure all required fields are set.
+type WatcherInitializer func(params WatcherInitializerParams) (Watcher, error)
 
 // StopFunc stops a subscription.
 // The context can be used for timeout/cancellation of cleanup operations.
 type StopFunc func(ctx context.Context) error
+
+// wrapFetchWithMutex wraps a FetchFunc with mutex protection if opMu is non-nil.
+// This is used by NewPolling and NewSubscription to ensure mutual exclusion
+// with Load/Save operations.
+func wrapFetchWithMutex(fetch FetchFunc, opMu *sync.Mutex) FetchFunc {
+	if opMu == nil || fetch == nil {
+		return fetch
+	}
+	return func(ctx context.Context) (bool, []byte, error) {
+		opMu.Lock()
+		defer opMu.Unlock()
+		return fetch(ctx)
+	}
+}

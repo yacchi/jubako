@@ -273,3 +273,9 @@ func (l *Layer) FillDetails(d *types.Details) {
 	d.Format = FormatEnv
 	d.Watcher = watcher.TypeNoop
 }
+
+// Watch returns a noop LayerWatcher since environment variables are read
+// once at startup and don't support watching for changes.
+func (l *Layer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return layer.NewNoopLayerWatcher(), nil
+}

@@ -48,7 +48,7 @@ func (s *testSource) CanSave() bool {
 	return false
 }
 
-func (s *testSource) Watch() (watcher.Watcher, error) {
+func (s *testSource) Watch() (watcher.WatcherInitializer, error) {
 	return watcher.NewSubscription(watcher.SubscriptionHandlerFunc(s.subscribe)), nil
 }
 

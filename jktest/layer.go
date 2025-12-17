@@ -31,10 +31,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // LayerFactory creates a Layer initialized with the given test data.
@@ -71,6 +73,15 @@ func SkipSaveArrayTest(reason string) LayerTesterOption {
 	}
 }
 
+// SkipWatchTest skips the watch tests.
+// Use this for layers that don't support watching or have custom watch behavior.
+// The reason parameter is required to document why the test is skipped.
+func SkipWatchTest(reason string) LayerTesterOption {
+	return func(lt *LayerTester) {
+		lt.skipWatchReason = reason
+	}
+}
+
 // LayerTester provides utilities to verify Layer implementations.
 type LayerTester struct {
 	t                   *testing.T
@@ -78,6 +89,7 @@ type LayerTester struct {
 	skipNullReason      string
 	skipArrayReason     string
 	skipSaveArrayReason string
+	skipWatchReason     string
 }
 
 // NewLayerTester creates a LayerTester for the given LayerFactory.
@@ -106,6 +118,7 @@ func (lt *LayerTester) TestAll() {
 	lt.t.Run("SaveEmptyInput", lt.testSaveEmptyInput)
 	lt.t.Run("SaveSkipsInvalidPaths", lt.testSaveSkipsInvalidPaths)
 	lt.t.Run("SaveArrayOperations", lt.testSaveArrayOperations)
+	lt.t.Run("Watch", lt.testWatch)
 }
 
 // testLoad verifies Load returns correct data.
@@ -592,6 +605,69 @@ func (lt *LayerTester) testSaveArrayOperations(t *testing.T) {
 		require(t, ok, "matrix[0] is %T, want []any", matrix[0])
 		require(t, len(row) == 3, "len(matrix[0]) = %d, want 3", len(row))
 		check(t, valuesEqual(row[2], 3), "matrix[0][2] = %v, want 3", row[2])
+	})
+}
+
+// testWatch verifies Watch behavior for Layer implementations.
+func (lt *LayerTester) testWatch(t *testing.T) {
+	if lt.skipWatchReason != "" {
+		t.Skip(lt.skipWatchReason)
+	}
+
+	testData := map[string]any{"key": "value"}
+	l := lt.factory(testData)
+
+	t.Run("WatchReturnsValidWatcher", func(t *testing.T) {
+		w, err := l.Watch()
+		requireNoError(t, err, "Watch() error = %v", err)
+		require(t, w != nil, "Watch() returned nil watcher")
+	})
+
+	t.Run("WatchResultsNilBeforeStart", func(t *testing.T) {
+		l := lt.factory(testData)
+		w, err := l.Watch()
+		requireNoError(t, err, "Watch() error = %v", err)
+
+		// Results() should return nil before Start() is called
+		results := w.Results()
+		check(t, results == nil, "Results() should return nil before Start() is called, got %v", results)
+	})
+
+	t.Run("WatchStartStop", func(t *testing.T) {
+		l := lt.factory(testData)
+
+		cfg := watcher.NewWatchConfig(
+			watcher.WithPollInterval(100 * time.Millisecond),
+		)
+		w, err := l.Watch(layer.WithBaseConfig(cfg))
+		requireNoError(t, err, "Watch() error = %v", err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		err = w.Start(ctx)
+		requireNoError(t, err, "Start() error = %v", err)
+
+		// Results() should return a non-nil channel after Start()
+		results := w.Results()
+		require(t, results != nil, "Results() returned nil after Start()")
+
+		// Stop should work without error
+		err = w.Stop(context.Background())
+		requireNoError(t, err, "Stop() error = %v", err)
+	})
+
+	t.Run("WatchCanBeCalledMultipleTimes", func(t *testing.T) {
+		l := lt.factory(testData)
+
+		// Calling Watch() multiple times should not cause issues
+		w1, err := l.Watch()
+		requireNoError(t, err, "First Watch() error = %v", err)
+		require(t, w1 != nil, "First Watch() returned nil watcher")
+
+		w2, err := l.Watch()
+		requireNoError(t, err, "Second Watch() error = %v", err)
+		require(t, w2 != nil, "Second Watch() returned nil watcher")
 	})
 }
 

@@ -85,7 +85,29 @@ type Source interface {
 // If a source doesn't implement WatchableSource, layers can fall back
 // to polling using the source's Load method.
 type WatchableSource interface {
-	// Watch returns a Watcher for this source.
-	// The watcher should not be started yet; the caller will call Start.
-	Watch() (watcher.Watcher, error)
+	// Watch returns a WatcherInitializer for this source.
+	// The initializer is a factory function that creates a Watcher when called
+	// with a fetch function and an optional operation mutex.
+	//
+	// This design separates the "what kind of watcher" decision (made by the source)
+	// from the "how to synchronize" decision (made by the caller/layer).
+	// The mutex is used by NewPolling and NewSubscription to wrap poll/fetch
+	// operations, ensuring mutual exclusion with Load/Save operations.
+	//
+	// Example implementation (subscription-based):
+	//
+	//	func (s *Source) Watch() (watcher.WatcherInitializer, error) {
+	//	    return watcher.NewSubscription(s), nil  // s implements SubscriptionHandler
+	//	}
+	//
+	// Example implementation (polling-based):
+	//
+	//	func (s *Source) Watch() (watcher.WatcherInitializer, error) {
+	//	    var lastETag *string
+	//	    poll := func(ctx context.Context) (bool, []byte, error) {
+	//	        // Poll logic using lastETag...
+	//	    }
+	//	    return watcher.NewPolling(poll), nil
+	//	}
+	Watch() (watcher.WatcherInitializer, error)
 }

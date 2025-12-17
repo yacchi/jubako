@@ -15,11 +15,20 @@ type noopWatcher struct {
 	running bool
 }
 
-// NewNoop creates a Watcher that never reports changes.
+// NewNoop returns a WatcherInitializer that creates a Watcher that never reports changes.
 // This is useful for immutable sources like bytes.Source to explicitly
 // indicate that watching is not needed, rather than returning an error.
-func NewNoop() Watcher {
-	return &noopWatcher{}
+//
+// Note: While params are validated for consistency, noop watchers never actually
+// use the Fetch or OpMu values since they don't fetch data or need synchronization.
+func NewNoop() WatcherInitializer {
+	return func(params WatcherInitializerParams) (Watcher, error) {
+		if err := params.Validate(); err != nil {
+			return nil, err
+		}
+		// Both Fetch and OpMu are validated but not used - noop watcher never uses them
+		return &noopWatcher{}, nil
+	}
 }
 
 // Type returns the watcher type identifier.
@@ -29,7 +38,9 @@ func (w *noopWatcher) Type() WatcherType {
 
 // Start begins the noop watcher.
 // The watcher will block until Stop is called, but never emit results.
-func (w *noopWatcher) Start(ctx context.Context, cfg WatchConfig) error {
+// Configuration is provided at initialization time via WatcherInitializerParams,
+// but noop watchers don't use any configuration.
+func (w *noopWatcher) Start(ctx context.Context) error {
 	w.mu.Lock()
 	if w.running {
 		w.mu.Unlock()

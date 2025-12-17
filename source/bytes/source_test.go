@@ -2,7 +2,11 @@ package bytes
 
 import (
 	"context"
+	"sync"
 	"testing"
+
+	"github.com/yacchi/jubako/source"
+	"github.com/yacchi/jubako/watcher"
 )
 
 // TestSource_Load_ReturnsDefensiveCopy verifies that Load returns a copy of the data,
@@ -58,5 +62,61 @@ func TestSource_Load_CancelledContext(t *testing.T) {
 	}
 }
 
-// Note: Basic Load, CanSave, Save, Type, and Watch tests are covered by
-// jktest.SourceTester compliance tests in jktest/source_test.go.
+// TestSource_Type verifies the Type method.
+func TestSource_Type(t *testing.T) {
+	src := New([]byte("data"))
+	if got := src.Type(); got != "bytes" {
+		t.Errorf("Type() = %q, want %q", got, "bytes")
+	}
+}
+
+// TestSource_CanSave verifies that bytes source does not support saving.
+func TestSource_CanSave(t *testing.T) {
+	src := New([]byte("data"))
+	if src.CanSave() {
+		t.Error("CanSave() = true, want false")
+	}
+}
+
+// TestSource_Save verifies that Save returns ErrSaveNotSupported.
+func TestSource_Save(t *testing.T) {
+	src := New([]byte("data"))
+	err := src.Save(context.Background(), func([]byte) ([]byte, error) {
+		return nil, nil
+	})
+	if err != source.ErrSaveNotSupported {
+		t.Errorf("Save() error = %v, want %v", err, source.ErrSaveNotSupported)
+	}
+}
+
+// TestSource_Watch verifies the Watch method returns a NoopWatcher.
+func TestSource_Watch(t *testing.T) {
+	src := New([]byte("data"))
+
+	init, err := src.Watch()
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	if init == nil {
+		t.Fatal("Watch() returned nil initializer")
+	}
+
+	var mu sync.Mutex
+	w, err := init(watcher.WatcherInitializerParams{
+		Fetch: func(ctx context.Context) (bool, []byte, error) {
+			return true, nil, nil
+		},
+		OpMu: &mu,
+	})
+	if err != nil {
+		t.Fatalf("WatcherInitializer() error = %v", err)
+	}
+	if w == nil {
+		t.Fatal("WatcherInitializer() returned nil watcher")
+	}
+
+	// Verify it's a noop watcher
+	if got := w.Type(); got != watcher.TypeNoop {
+		t.Errorf("Watch().Type() = %v, want %v", got, watcher.TypeNoop)
+	}
+}

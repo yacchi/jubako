@@ -3,12 +3,30 @@ package jktest
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/watcher"
 )
+
+// testInitParams creates WatcherInitializerParams for testing.
+// Uses a dummy fetch function and a real mutex.
+func testInitParams() watcher.WatcherInitializerParams {
+	return testInitParamsWithConfig(watcher.NewWatchConfig())
+}
+
+func testInitParamsWithConfig(cfg watcher.WatchConfig) watcher.WatcherInitializerParams {
+	var mu sync.Mutex
+	return watcher.WatcherInitializerParams{
+		Fetch: func(ctx context.Context) (bool, []byte, error) {
+			return true, nil, nil
+		},
+		OpMu:   &mu,
+		Config: cfg,
+	}
+}
 
 // SourceFactory creates a Source initialized with the given test data.
 // The factory is called for each test case to ensure test isolation.
@@ -93,9 +111,14 @@ func (st *SourceTester) testWatch(t *testing.T) {
 	}
 
 	t.Run("WatchReturnsValidWatcher", func(t *testing.T) {
-		w, err := ws.Watch()
+		init, err := ws.Watch()
 		requireNoError(t, err, "Watch() error = %v", err)
-		require(t, w != nil, "Watch() returned nil watcher")
+		require(t, init != nil, "Watch() returned nil initializer")
+
+		// Create watcher with test params
+		w, err := init(testInitParams())
+		requireNoError(t, err, "WatcherInitializer() error = %v", err)
+		require(t, w != nil, "WatcherInitializer() returned nil watcher")
 
 		// Verify watcher type is valid
 		typ := w.Type()
@@ -105,8 +128,11 @@ func (st *SourceTester) testWatch(t *testing.T) {
 	})
 
 	t.Run("WatchDoesNotStartUntilStartCalled", func(t *testing.T) {
-		w, err := ws.Watch()
+		init, err := ws.Watch()
 		requireNoError(t, err, "Watch() error = %v", err)
+
+		w, err := init(testInitParams())
+		requireNoError(t, err, "WatcherInitializer() error = %v", err)
 
 		// Results() should return nil before Start() is called
 		results := w.Results()
@@ -114,17 +140,19 @@ func (st *SourceTester) testWatch(t *testing.T) {
 	})
 
 	t.Run("WatchStartStop", func(t *testing.T) {
-		w, err := ws.Watch()
+		init, err := ws.Watch()
 		requireNoError(t, err, "Watch() error = %v", err)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		cfg := watcher.NewWatchConfig(
 			watcher.WithPollInterval(100 * time.Millisecond),
 		)
+		w, err := init(testInitParamsWithConfig(cfg))
+		requireNoError(t, err, "WatcherInitializer() error = %v", err)
 
-		err = w.Start(ctx, cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		err = w.Start(ctx)
 		requireNoError(t, err, "Start() error = %v", err)
 
 		// Results() should return a non-nil channel after Start()
@@ -138,13 +166,18 @@ func (st *SourceTester) testWatch(t *testing.T) {
 
 	t.Run("WatchCanBeCalledMultipleTimes", func(t *testing.T) {
 		// Calling Watch() multiple times should not cause issues
-		w1, err := ws.Watch()
+		init1, err := ws.Watch()
 		requireNoError(t, err, "First Watch() error = %v", err)
-		require(t, w1 != nil, "First Watch() returned nil watcher")
+		require(t, init1 != nil, "First Watch() returned nil initializer")
 
-		w2, err := ws.Watch()
+		init2, err := ws.Watch()
 		requireNoError(t, err, "Second Watch() error = %v", err)
-		require(t, w2 != nil, "Second Watch() returned nil watcher")
+		require(t, init2 != nil, "Second Watch() returned nil initializer")
+
+		w1, err := init1(testInitParams())
+		requireNoError(t, err, "First WatcherInitializer() error = %v", err)
+		w2, err := init2(testInitParams())
+		requireNoError(t, err, "Second WatcherInitializer() error = %v", err)
 
 		// Both watchers should have valid types
 		check(t, w1.Type() != "", "First watcher Type() returned empty string")

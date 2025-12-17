@@ -33,7 +33,7 @@ items, and together they form a complete set - much like how this library manage
     - [Source Interface](#source-interface)
     - [Document Interface](#document-interface)
     - [Layer Interface](#layer-interface)
-- [Comparison with Other Libraries](#comparison-with-other-libraries)
+- [Comparison with Typical Config Libraries](#comparison-with-typical-config-libraries)
 - [License](#license)
 - [Contributing](#contributing)
 
@@ -1043,12 +1043,18 @@ See the following packages for existing implementations:
 
 ## Comparison with Typical Config Libraries
 
-| Feature             | Jubako                             | Typical Libraries     |
-|---------------------|------------------------------------|-----------------------|
-| Layer tracking      | Per-layer preservation             | Merged (irreversible) |
-| Origin tracking     | Yes                                | No                    |
-| Write support       | Layer-aware write-back             | Limited               |
-| Format preservation | Yes (AST-based, supported formats) | No                    |
+| Feature                | Jubako                                              | Typical Libraries                   |
+|------------------------|-----------------------------------------------------|-------------------------------------|
+| Layer tracking         | Per-layer preservation                              | Merged (irreversible)               |
+| Origin tracking        | Yes                                                 | No                                  |
+| Write support          | Layer-aware write-back                              | Limited                             |
+| Format preservation    | Yes (AST-based, supported formats)                  | No                                  |
+| Change notifications   | Built-in `Subscribe` + `Watch` (debounce supported)  | Often manual or coarse              |
+| Path-based read/write  | JSON Pointer API (`GetAt`, `SetTo`)                 | Ad-hoc key strings                  |
+| Dirty tracking         | Per-layer dirty + store-level `IsDirty()`           | Usually none                        |
+| Safe writes            | Patch-based updates + optimistic locking            | Full rewrite, last-writer-wins      |
+| Layer controls         | Per-layer read-only and watch disable options       | Rare                                |
+| Extensibility          | Pluggable `Source` / `Document` / `Layer` interfaces| Often format/source-specific        |
 
 ## License
 

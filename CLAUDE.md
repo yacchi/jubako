@@ -359,7 +359,7 @@ store.Add(
 // If you need per-layer watch behavior, wire watchers manually via layer.WatchableLayer.
 ```
 
-### Remote Sources (AWS S3, SSM)
+### Remote Sources (AWS S3, Parameter Store, AppConfig)
 
 ```go
 import "github.com/yacchi/jubako/source/aws"
@@ -371,9 +371,13 @@ cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-west-2"))
 s3src := aws.NewS3Source("my-bucket", "config/app.yaml", aws.WithAWSConfig(cfg))
 store.Add(layer.New("s3-config", s3src, yaml.New()))
 
-// SSM Parameter Store source - uses version for change detection
-ssmsrc := aws.NewSSMSource("/app/config", aws.WithDecryption(true), aws.WithAWSConfig(cfg))
-store.Add(layer.New("ssm-config", ssmsrc, yaml.New()))
+// Parameter Store source - uses version for change detection
+pssrc := aws.NewParameterStoreSource("/app/config", aws.WithDecryption(true), aws.WithAWSConfig(cfg))
+store.Add(layer.New("ps-config", pssrc, yaml.New()))
+
+// AppConfig source - uses configuration tokens for change detection
+acsrc := aws.NewAppConfigSource("my-app", "prod", "config-profile", aws.WithAWSConfig(cfg))
+store.Add(layer.New("appconfig", acsrc, yaml.New()))
 ```
 
 ## Implementation Status
@@ -418,7 +422,8 @@ store.Add(layer.New("ssm-config", ssmsrc, yaml.New()))
 - [x] Layer-level watch configuration override
 - [x] AWS sources (`source/aws`) with shared configuration
   - S3Source with ETag-based polling
-  - SSMSource with version-based polling
+  - ParameterStoreSource with version-based polling
+  - AppConfigSource with token-based polling
 
 ### Phase 6: Advanced Features ⏳ Planned
 
@@ -470,11 +475,12 @@ jubako/
 │   │   └── source.go
 │   ├── fs/                # File system source (fsnotify)
 │   │   └── source.go
-│   └── aws/               # AWS sources (S3, SSM) [submodule]
+│   └── aws/               # AWS sources (S3, Parameter Store, AppConfig) [submodule]
 │       ├── go.mod
 │       ├── config.go      # Shared AWS configuration (WithAWSConfig)
 │       ├── s3.go          # S3Source (ETag-based polling)
-│       └── ssm.go         # SSMSource (Version-based polling)
+│       ├── parameter_store.go  # ParameterStoreSource (Version-based polling)
+│       └── appconfig.go   # AppConfigSource (Token-based polling)
 │
 ├── watcher/               # Watcher abstraction
 │   ├── types.go           # WatchConfig, WatchResult, NotifyFunc
@@ -568,7 +574,7 @@ jktest.NewLayerTester(t, factory,
 - `gopkg.in/yaml.v3` - YAML support (`format/yaml`)
 - `github.com/pelletier/go-toml/v2` - TOML support (`format/toml`)
 - `github.com/tailscale/hujson` - JSONC support (`format/jsonc`)
-- `github.com/aws/aws-sdk-go-v2` - AWS S3 and SSM sources (`source/aws`)
+- `github.com/aws/aws-sdk-go-v2` - AWS S3, Parameter Store, and AppConfig sources (`source/aws`)
 
 ## Design Decisions Log
 

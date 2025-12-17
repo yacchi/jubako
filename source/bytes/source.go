@@ -74,7 +74,8 @@ func (s *Source) CanSave() bool {
 }
 
 // Watch implements the source.WatchableSource interface.
-// Returns a NoopWatcher because byte slice sources are immutable and never change.
-func (s *Source) Watch() (watcher.Watcher, error) {
+// Returns a WatcherInitializer that creates a NoopWatcher because byte slice
+// sources are immutable and never change.
+func (s *Source) Watch() (watcher.WatcherInitializer, error) {
 	return watcher.NewNoop(), nil
 }

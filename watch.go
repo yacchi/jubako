@@ -83,14 +83,9 @@ func (s *Store[T]) Watch(ctx context.Context, cfg StoreWatchConfig) (stop func(c
 			continue
 		}
 
-		// Check if the layer supports watching
-		wl, ok := entry.layer.(layer.WatchableLayer)
-		if !ok {
-			continue
-		}
-
-		// Create the watcher (doesn't start yet)
-		lw, err := wl.Watch()
+		// Create the watcher with config (doesn't start yet)
+		// The watchCfg is passed via WithBaseConfig option
+		lw, err := entry.layer.Watch(layer.WithBaseConfig(watchCfg))
 		if err != nil {
 			s.mu.Unlock()
 			// Clean up any watchers we already created
@@ -118,7 +113,8 @@ func (s *Store[T]) Watch(ctx context.Context, cfg StoreWatchConfig) (stop func(c
 	watchCtx, watchCancel := context.WithCancel(ctx)
 
 	for _, ws := range watchers {
-		if err := ws.watcher.Start(watchCtx, watchCfg); err != nil {
+		// Configuration was already provided at Watch() time via WatcherInitializerParams
+		if err := ws.watcher.Start(watchCtx); err != nil {
 			watchCancel()
 			// Clean up watchers
 			for _, w := range watchers {

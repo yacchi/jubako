@@ -3,137 +3,158 @@ package watcher
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// PollHandler defines the interface for polling-based change detection.
-// Implementations should fetch the latest data and indicate if it changed.
-type PollHandler interface {
-	// Poll fetches the latest data from the source.
-	// Returns the data and any error encountered.
-	// The watcher will use CompareFunc to detect changes.
-	Poll(ctx context.Context) (data []byte, err error)
-}
-
-// PollHandlerFunc is a function that implements PollHandler.
-type PollHandlerFunc func(ctx context.Context) (data []byte, err error)
-
-// Poll implements PollHandler.
-func (f PollHandlerFunc) Poll(ctx context.Context) ([]byte, error) {
-	return f(ctx)
-}
-
-// pollingWatcher implements Watcher using polling.
+// pollingWatcher embeds subscriptionWatcher and implements SubscriptionHandler.
+// It acts as its own handler, running the polling loop in Subscribe.
 type pollingWatcher struct {
-	handler PollHandler
+	*subscriptionWatcher
+	poll FetchFunc
 
-	results  chan WatchResult
-	stopCh   chan struct{}
+	// Configuration is set at initialization time and never changes
+	interval    time.Duration
+	compareFunc CompareFunc
+
+	// Runtime state protected by mutex
+	mu       sync.Mutex
 	lastData []byte
-
-	mu      sync.Mutex
-	running bool
 }
 
-// NewPolling creates a new polling-based Watcher.
-// The handler's Poll method is called at each interval.
-// Changes are detected using the CompareFunc from WatchConfig.
-func NewPolling(handler PollHandler) Watcher {
-	return &pollingWatcher{
-		handler: handler,
+var _ SubscriptionHandler = (*pollingWatcher)(nil)
+
+// NewPolling returns a WatcherInitializer that creates a polling-based Watcher.
+//
+// The poll function is called at each interval (configured via WatcherInitializerParams.Config.PollInterval).
+// The first poll happens immediately.
+//
+// The poll function will be wrapped with mutex protection using params.OpMu
+// to ensure mutual exclusion with Load/Save operations.
+//
+// Return values for the poll function:
+//   - changed=false: No notification is emitted
+//   - changed=true with data: Notification is emitted with the data
+//   - changed=true with data=nil: Event-only; the watcher uses the injected FetchFunc
+//     (provided via params.Fetch) to fetch the actual data
+//   - err!=nil: Error notification is emitted
+//
+// Note: params.Config is expected to have valid values (non-zero PollInterval, non-nil CompareFunc).
+// Use layer.ResolveWatchConfig() or WatchConfig.ApplyDefaults() to ensure this.
+func NewPolling(poll FetchFunc) WatcherInitializer {
+	return func(params WatcherInitializerParams) (Watcher, error) {
+		if err := params.Validate(); err != nil {
+			return nil, err
+		}
+
+		pw := &pollingWatcher{
+			poll:        wrapFetchWithMutex(poll, params.OpMu),
+			interval:    params.Config.PollInterval,
+			compareFunc: params.Config.CompareFunc,
+		}
+		pw.subscriptionWatcher = newSubscriptionWatcher(pw, params.Fetch, params.OpMu)
+		return pw, nil
 	}
 }
 
-// Type returns the watcher type identifier.
+// Type returns TypePolling.
 func (w *pollingWatcher) Type() WatcherType {
 	return TypePolling
 }
 
-// Start begins polling at the configured interval.
-// The first poll happens immediately.
-func (w *pollingWatcher) Start(ctx context.Context, cfg WatchConfig) error {
-	w.mu.Lock()
-	if w.running {
-		w.mu.Unlock()
-		return nil
-	}
-	w.running = true
-	w.results = make(chan WatchResult)
-	w.stopCh = make(chan struct{})
-	w.mu.Unlock()
+// Subscribe implements SubscriptionHandler. It starts the polling loop.
+// The polling loop uses CompareFunc to detect changes between consecutive polls.
+func (w *pollingWatcher) Subscribe(ctx context.Context, notify NotifyFunc) (StopFunc, error) {
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+	var once sync.Once
 
-	compareFunc := cfg.CompareFunc
-	if compareFunc == nil {
-		compareFunc = DefaultCompareFunc
-	}
-
-	interval := cfg.PollInterval
-	if interval <= 0 {
-		interval = DefaultPollInterval
-	}
-
+	wg.Add(1)
 	go func() {
-		defer close(w.results)
+		defer wg.Done()
+
+		var polling int32 // 0 = not polling, 1 = polling
+
+		runOnce := func() {
+			// Skip if already polling (prevent double execution)
+			if !atomic.CompareAndSwapInt32(&polling, 0, 1) {
+				return
+			}
+			defer atomic.StoreInt32(&polling, 0)
+
+			changed, data, err := w.poll(ctx)
+			if err != nil {
+				notify(nil, err)
+				return
+			}
+
+			// Use CompareFunc to detect actual changes
+			if changed {
+				// Event-only notification: fetch data using the synchronized fetcher
+				if data == nil && w.fetcher != nil {
+					var fetchErr error
+					changed, data, fetchErr = w.fetcher(ctx)
+					if fetchErr != nil {
+						notify(nil, fetchErr)
+						return
+					}
+					if !changed {
+						// Fetcher says no change, skip notification
+						return
+					}
+				}
+
+				w.mu.Lock()
+				lastData := w.lastData
+				if w.compareFunc(lastData, data) {
+					// Data has changed
+					w.lastData = data
+					w.mu.Unlock()
+					notify(data, nil)
+				} else {
+					// No change detected
+					w.mu.Unlock()
+				}
+			}
+		}
+
+		// First poll happens immediately.
+		runOnce()
 
 		for {
 			startTime := time.Now()
 
-			data, err := w.handler.Poll(ctx)
-			if err != nil {
-				select {
-				case w.results <- WatchResult{Error: err}:
-				case <-ctx.Done():
-					return
-				case <-w.stopCh:
-					return
-				}
-			} else if w.lastData == nil || compareFunc(w.lastData, data) {
-				// First poll or data changed
-				w.lastData = data
-				select {
-				case w.results <- WatchResult{Data: data}:
-				case <-ctx.Done():
-					return
-				case <-w.stopCh:
-					return
-				}
-			}
-
-			// Calculate wait time, accounting for processing time
-			elapsed := time.Since(startTime)
-			waitTime := interval - elapsed
-			if waitTime <= 0 {
-				// Processing took longer than interval, skip wait
-				continue
-			}
-
+			// Wait for interval, accounting for poll execution time
 			select {
-			case <-time.After(waitTime):
 			case <-ctx.Done():
 				return
-			case <-w.stopCh:
+			case <-stopCh:
 				return
+			case <-time.After(w.interval):
+			}
+
+			runOnce()
+
+			// Adjust next wait to maintain consistent interval
+			elapsed := time.Since(startTime)
+			if elapsed >= w.interval {
+				// Poll took longer than interval, skip additional wait
+				continue
 			}
 		}
 	}()
 
-	return nil
-}
+	stop := func(ctx context.Context) error {
+		once.Do(func() { close(stopCh) })
+		wg.Wait()
 
-// Stop stops polling.
-func (w *pollingWatcher) Stop(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+		// Reset state for potential restart
+		w.mu.Lock()
+		w.lastData = nil
+		w.mu.Unlock()
 
-	if !w.running {
 		return nil
 	}
-	w.running = false
-	close(w.stopCh)
-	return nil
-}
 
-// Results returns the channel receiving poll results.
-func (w *pollingWatcher) Results() <-chan WatchResult {
-	return w.results
+	return stop, nil
 }

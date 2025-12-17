@@ -10,10 +10,11 @@ type Watcher interface {
 	Type() WatcherType
 
 	// Start begins watching for changes.
-	// The config is applied at start time, allowing runtime configuration.
+	// Configuration (PollInterval, CompareFunc, etc.) is provided at initialization time
+	// via WatcherInitializerParams, so Start only needs the context.
 	// Results are sent to the channel returned by Results().
 	// Must be called before Results() returns a valid channel.
-	Start(ctx context.Context, cfg WatchConfig) error
+	Start(ctx context.Context) error
 
 	// Stop stops watching and releases resources.
 	// The context can be used for timeout/cancellation of cleanup operations.

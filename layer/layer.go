@@ -5,6 +5,7 @@ package layer
 
 import (
 	"context"
+	"sync"
 
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/source"
@@ -43,14 +44,30 @@ type Layer interface {
 
 	// CanSave returns true if this layer supports saving.
 	CanSave() bool
+
+	// Watch returns a LayerWatcher for this layer.
+	// The watcher should not be started yet; the caller will call Start.
+	//
+	// Use WithBaseConfig to pass the base watch configuration from the Store.
+	// Use WithLayerWatchConfig to override specific options at the layer level.
+	//
+	// Layers that don't support watching should return a noop watcher
+	// using NewNoopLayerWatcher().
+	Watch(opts ...WatchOption) (LayerWatcher, error)
 }
 
 // basicLayer is the standard Layer implementation that combines a Source and Document.
 // It is not exported; use the New() function to create instances.
+//
+// basicLayer provides operation-level synchronization via opMu, ensuring that
+// Load, Save, and poll operations are mutually exclusive. This allows Source
+// implementations to be simple I/O operations without their own synchronization.
 type basicLayer struct {
 	name   Name
 	source source.Source
 	doc    document.Document
+
+	opMu sync.Mutex // protects Load/Save/poll from concurrent execution
 }
 
 // DocumentProvider is an optional interface that layers can implement
@@ -66,15 +83,11 @@ var _ Layer = (*basicLayer)(nil)
 // Ensure basicLayer implements DocumentProvider interface.
 var _ DocumentProvider = (*basicLayer)(nil)
 
-// Ensure basicLayer implements WatchableLayer interface.
-var _ WatchableLayer = (*basicLayer)(nil)
-
 // New creates a new Layer with the given Source and Document.
 // The Document is stateless and handles format parsing/serialization.
 //
 // The returned Layer also implements:
 //   - DocumentProvider: for accessing the underlying document
-//   - WatchableLayer: for file watching support
 //
 // Example:
 //
@@ -93,9 +106,20 @@ func (l *basicLayer) Name() Name {
 	return l.name
 }
 
+// loadRawNoLock reads raw bytes from the source without mutex protection.
+// This MUST be called with opMu held or from within a mutex-wrapped function.
+// Used by watchers where the mutex is applied at a higher level via WatcherInitializer.
+func (l *basicLayer) loadRawNoLock(ctx context.Context) ([]byte, error) {
+	return l.source.Load(ctx)
+}
+
 // Load reads from the source via Document.Get and returns data as map[string]any.
+// Load is synchronized with Save and poll operations via opMu.
 func (l *basicLayer) Load(ctx context.Context) (map[string]any, error) {
-	data, err := l.source.Load(ctx)
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
+
+	data, err := l.loadRawNoLock(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +128,13 @@ func (l *basicLayer) Load(ctx context.Context) (map[string]any, error) {
 
 // Save generates output via Document.Apply and saves to the source.
 // Uses optimistic locking to detect external modifications.
+// Save is synchronized with Load and poll operations via opMu.
 // Returns source.ErrSaveNotSupported if the source doesn't support saving.
 // Returns source.ErrSourceModified if the source was modified externally.
 func (l *basicLayer) Save(ctx context.Context, changeset document.JSONPatchSet) error {
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
+
 	return l.source.Save(ctx, func(current []byte) ([]byte, error) {
 		return l.doc.Apply(current, changeset)
 	})
@@ -125,9 +153,18 @@ func (l *basicLayer) FillDetails(d *types.Details) {
 	// Set watcher type
 	if ws, ok := l.source.(source.WatchableSource); ok {
 		// Source provides its own watcher
-		w, err := ws.Watch()
+		init, err := ws.Watch()
 		if err == nil {
-			d.Watcher = w.Type()
+			// Create params for watcher initialization (only to get the type)
+			w, err := init(watcher.WatcherInitializerParams{
+				Fetch: func(ctx context.Context) (bool, []byte, error) {
+					return true, nil, nil
+				},
+				OpMu: &l.opMu,
+			})
+			if err == nil {
+				d.Watcher = w.Type()
+			}
 		}
 	} else {
 		// Fallback to polling
@@ -151,28 +188,68 @@ func (l *basicLayer) CanSave() bool {
 	return l.source.CanSave()
 }
 
-// Watch implements the WatchableLayer interface.
+// Watch implements the Layer interface.
 // Returns a LayerWatcher that transforms source data into map[string]any.
 //
 // If the underlying source implements WatchableSource, its watcher is used.
 // Otherwise, a fallback polling watcher is created using the source's Load method.
+//
+// # Configuration Flow
+//
+// Watch options are applied in two stages:
+//  1. Store passes base config via WithBaseConfig (from StoreWatchConfig.WatcherOpts)
+//  2. Layer-level overrides via WithLayerWatchConfig (for per-layer customization)
+//
+// The final config is computed by watchOptions.resolveConfig() which merges
+// these two stages in order. This ensures Store-level defaults are respected
+// while allowing layers to override specific settings.
+//
+// # Synchronization
+//
+// All I/O operations (poll/fetch) are synchronized with Load and Save operations
+// via the layer's mutex (opMu), ensuring mutual exclusion. The mutex is passed to
+// the WatcherInitializer, which wraps poll/fetch functions as appropriate.
 func (l *basicLayer) Watch(opts ...WatchOption) (LayerWatcher, error) {
-	var options watchOptions
-	for _, opt := range opts {
-		opt(&options)
+	// Resolve final config: base (from Store) + layer overrides
+	cfg := ResolveWatchConfig(opts...)
+
+	var init watcher.WatcherInitializer
+
+	// Create a FetchFunc that wraps loadRawNoLock.
+	// This always returns changed=true to indicate data was successfully fetched.
+	// Actual change detection is performed by pollingWatcher using CompareFunc
+	// to compare the fetched data with previously stored data.
+	fetch := func(ctx context.Context) (bool, []byte, error) {
+		data, err := l.loadRawNoLock(ctx)
+		if err != nil {
+			return false, nil, err
+		}
+		return true, data, nil
 	}
 
 	// Try to use source's native watcher if available
 	if ws, ok := l.source.(source.WatchableSource); ok {
-		w, err := ws.Watch()
+		var err error
+		init, err = ws.Watch()
 		if err != nil {
 			return nil, err
 		}
-		return newLayerWatcher(w, l.doc, options.configOpts), nil
+	} else {
+		// Fallback to polling using the fetch function.
+		// The mutex will be applied by NewPolling.
+		init = watcher.NewPolling(fetch)
 	}
 
-	// Fallback to polling using the source's Load method
-	handler := newFallbackPollHandler(l.source)
-	w := watcher.NewPolling(handler)
-	return newLayerWatcher(w, l.doc, options.configOpts), nil
+	// Pass fetch, opMu, and resolved config to the initializer.
+	// The initializer will wrap poll/fetch functions with mutex protection
+	// and apply the configuration.
+	w, err := init(watcher.WatcherInitializerParams{
+		Fetch:  fetch,
+		OpMu:   &l.opMu,
+		Config: cfg,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newLayerWatcher(w, l.doc), nil
 }

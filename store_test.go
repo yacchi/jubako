@@ -894,6 +894,9 @@ func (l *noSaveLayer) Save(context.Context, document.JSONPatchSet) error {
 	return source.ErrSaveNotSupported
 }
 func (l *noSaveLayer) CanSave() bool { return false }
+func (l *noSaveLayer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return layer.NewNoopLayerWatcher(), nil
+}
 
 type pathMemSource struct {
 	path    string
@@ -943,6 +946,9 @@ func (l *failingSaveLayer) Save(context.Context, document.JSONPatchSet) error {
 	return errors.New("save error")
 }
 func (l *failingSaveLayer) CanSave() bool { return true }
+func (l *failingSaveLayer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return layer.NewNoopLayerWatcher(), nil
+}
 
 type nilDataLayer struct{ name layer.Name }
 
@@ -956,6 +962,9 @@ func (l *nilDataLayer) Load(ctx context.Context) (map[string]any, error) {
 }
 func (l *nilDataLayer) Save(context.Context, document.JSONPatchSet) error { return nil }
 func (l *nilDataLayer) CanSave() bool                                     { return true }
+func (l *nilDataLayer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return layer.NewNoopLayerWatcher(), nil
+}
 
 func TestStore_ReadOnlyAndLayerInfo(t *testing.T) {
 	ctx := context.Background()

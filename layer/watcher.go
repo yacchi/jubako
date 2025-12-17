@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/yacchi/jubako/document"
-	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/watcher"
 )
 
@@ -20,8 +19,8 @@ type LayerWatchResult struct {
 // LayerWatcher watches a layer for changes and notifies via a channel.
 type LayerWatcher interface {
 	// Start begins watching for changes.
-	// The config is applied at start time.
-	Start(ctx context.Context, cfg watcher.WatchConfig) error
+	// Configuration is provided at creation time via Layer.Watch().
+	Start(ctx context.Context) error
 
 	// Stop stops watching and releases resources.
 	Stop(ctx context.Context) error
@@ -30,55 +29,26 @@ type LayerWatcher interface {
 	Results() <-chan LayerWatchResult
 }
 
-// WatchableLayer is an optional interface that layers can implement
-// to support change detection and hot reload.
-type WatchableLayer interface {
-	// Watch returns a LayerWatcher for this layer.
-	// The watcher should not be started yet; the caller will call Start.
-	//
-	// Options can be used to override the WatchConfig at the layer level.
-	Watch(opts ...WatchOption) (LayerWatcher, error)
-}
-
-// WatchOption configures layer-level watch behavior.
-type WatchOption func(*watchOptions)
-
-type watchOptions struct {
-	configOpts []watcher.WatchConfigOption
-}
-
-// WithLayerWatchConfig allows layer-level override of WatchConfig.
-// These options are applied after Store-level options.
-func WithLayerWatchConfig(opts ...watcher.WatchConfigOption) WatchOption {
-	return func(o *watchOptions) {
-		o.configOpts = append(o.configOpts, opts...)
-	}
-}
-
 // layerWatcher wraps a source-level watcher and transforms []byte to map[string]any.
 type layerWatcher struct {
-	watcher    watcher.Watcher
-	doc        document.Document
-	configOpts []watcher.WatchConfigOption
-	results    chan LayerWatchResult
+	watcher watcher.Watcher
+	doc     document.Document
+	results chan LayerWatchResult
 }
 
-func newLayerWatcher(w watcher.Watcher, doc document.Document, opts []watcher.WatchConfigOption) *layerWatcher {
+func newLayerWatcher(w watcher.Watcher, doc document.Document) *layerWatcher {
 	return &layerWatcher{
-		watcher:    w,
-		doc:        doc,
-		configOpts: opts,
+		watcher: w,
+		doc:     doc,
 	}
 }
 
 // Start begins watching and transforms results from []byte to map[string]any.
-func (w *layerWatcher) Start(ctx context.Context, cfg watcher.WatchConfig) error {
+// Configuration is provided at creation time via Layer.Watch().
+func (w *layerWatcher) Start(ctx context.Context) error {
 	w.results = make(chan LayerWatchResult)
 
-	// Apply layer-level options to override store-level config
-	cfg.ApplyOptions(w.configOpts...)
-
-	if err := w.watcher.Start(ctx, cfg); err != nil {
+	if err := w.watcher.Start(ctx); err != nil {
 		close(w.results)
 		return err
 	}
@@ -108,18 +78,53 @@ func (w *layerWatcher) Results() <-chan LayerWatchResult {
 	return w.results
 }
 
-// fallbackPollHandler implements watcher.PollHandler for sources
-// that don't implement WatchableSource.
-type fallbackPollHandler struct {
-	source source.Source
+// noopLayerWatcher is a LayerWatcher that never reports changes.
+// Use this for layers that don't support watching (e.g., env layer).
+type noopLayerWatcher struct {
+	results chan LayerWatchResult
+	stopCh  chan struct{}
+	running bool
 }
 
-func newFallbackPollHandler(src source.Source) *fallbackPollHandler {
-	return &fallbackPollHandler{source: src}
+// NewNoopLayerWatcher creates a LayerWatcher that never reports changes.
+// This is useful for layers that don't support watching, such as environment
+// variable layers that are read once at startup.
+func NewNoopLayerWatcher() LayerWatcher {
+	return &noopLayerWatcher{}
 }
 
-// Poll loads data from the source.
-// The PollingWatcher will use CompareFunc to detect changes.
-func (h *fallbackPollHandler) Poll(ctx context.Context) ([]byte, error) {
-	return h.source.Load(ctx)
+// Start begins the noop watcher. It will block until Stop is called but never emit results.
+func (w *noopLayerWatcher) Start(ctx context.Context) error {
+	if w.running {
+		return nil
+	}
+	w.running = true
+	w.results = make(chan LayerWatchResult)
+	w.stopCh = make(chan struct{})
+
+	go func() {
+		defer close(w.results)
+		select {
+		case <-ctx.Done():
+		case <-w.stopCh:
+		}
+	}()
+
+	return nil
+}
+
+// Stop stops the noop watcher.
+func (w *noopLayerWatcher) Stop(ctx context.Context) error {
+	if !w.running {
+		return nil
+	}
+	w.running = false
+	close(w.stopCh)
+	return nil
+}
+
+// Results returns the channel receiving watch results.
+// For noopLayerWatcher, this channel never receives any results.
+func (w *noopLayerWatcher) Results() <-chan LayerWatchResult {
+	return w.results
 }

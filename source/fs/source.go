@@ -360,6 +360,9 @@ func expandTilde(path string) (string, error) {
 
 // Subscribe implements the watcher.SubscriptionHandler interface.
 // It sets up fsnotify-based file watching and calls notify when the file changes.
+//
+// This uses the event-only notification pattern: notify(nil, nil) is called
+// when a change is detected, and the subscriber fetches data separately.
 func (s *Source) Subscribe(ctx context.Context, notify watcher.NotifyFunc) (watcher.StopFunc, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -390,9 +393,10 @@ func (s *Source) Subscribe(ctx context.Context, notify watcher.NotifyFunc) (watc
 					continue
 				}
 				// Handle write, create, and rename events
+				// Notify with (nil, nil) to indicate event-only notification.
+				// The subscriber will fetch data using the synchronized fetch function.
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
-					data, err := s.Load(ctx)
-					notify(data, err)
+					notify(nil, nil)
 				}
 			case err, ok := <-w.Errors:
 				if !ok {
@@ -413,7 +417,7 @@ func (s *Source) Subscribe(ctx context.Context, notify watcher.NotifyFunc) (watc
 }
 
 // Watch implements the source.WatchableSource interface.
-// Returns a SubscriptionWatcher that uses fsnotify for event-based file watching.
-func (s *Source) Watch() (watcher.Watcher, error) {
+// Returns a WatcherInitializer that creates a SubscriptionWatcher using fsnotify.
+func (s *Source) Watch() (watcher.WatcherInitializer, error) {
 	return watcher.NewSubscription(watcher.SubscriptionHandlerFunc(s.Subscribe)), nil
 }
