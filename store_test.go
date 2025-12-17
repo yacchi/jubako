@@ -798,6 +798,256 @@ func TestStore_SetTo(t *testing.T) {
 	})
 }
 
+func TestStore_DeleteFrom(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("delete single path", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// Delete port
+		err = store.DeleteFrom("test", "/port")
+		if err != nil {
+			t.Fatalf("DeleteFrom() error = %v", err)
+		}
+
+		cfg := store.Get()
+		if cfg.Port != 0 {
+			t.Errorf("After DeleteFrom() Port = %d, want 0", cfg.Port)
+		}
+		if cfg.Host != "localhost" {
+			t.Errorf("After DeleteFrom() Host = %q, want localhost", cfg.Host)
+		}
+	})
+
+	t.Run("delete multiple paths", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// Delete both host and port
+		err = store.DeleteFrom("test", "/host", "/port")
+		if err != nil {
+			t.Fatalf("DeleteFrom() error = %v", err)
+		}
+
+		cfg := store.Get()
+		if cfg.Port != 0 {
+			t.Errorf("After DeleteFrom() Port = %d, want 0", cfg.Port)
+		}
+		if cfg.Host != "" {
+			t.Errorf("After DeleteFrom() Host = %q, want empty", cfg.Host)
+		}
+	})
+
+	t.Run("delete notifies subscribers", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		var notified bool
+		var receivedHost string
+		unsubscribe := store.Subscribe(func(cfg testConfig) {
+			notified = true
+			receivedHost = cfg.Host
+		})
+		defer unsubscribe()
+
+		err = store.DeleteFrom("test", "/host")
+		if err != nil {
+			t.Fatalf("DeleteFrom() error = %v", err)
+		}
+
+		if !notified {
+			t.Error("Subscribers were not notified after DeleteFrom()")
+		}
+		if receivedHost != "" {
+			t.Errorf("Subscriber received Host = %q, want empty", receivedHost)
+		}
+	})
+
+	t.Run("delete non-existent path is no-op", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// Delete non-existent path should succeed without error
+		err = store.DeleteFrom("test", "/nonexistent")
+		if err != nil {
+			t.Fatalf("DeleteFrom() error = %v", err)
+		}
+
+		// Layer should not be dirty
+		info := store.GetLayerInfo("test")
+		if info.Dirty() {
+			t.Error("Layer should not be dirty after deleting non-existent path")
+		}
+	})
+
+	t.Run("delete from non-existent layer", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.DeleteFrom("nonexistent", "/port")
+		if err == nil {
+			t.Error("DeleteFrom() should return error for non-existent layer")
+		}
+	})
+
+	t.Run("delete before load", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost"}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		// Try to delete before loading
+		err = store.DeleteFrom("test", "/host")
+		if err == nil {
+			t.Error("DeleteFrom() should return error before Load()")
+		}
+	})
+
+	t.Run("delete from read-only layer", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults), WithReadOnly())
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		err = store.DeleteFrom("test", "/port")
+		if err == nil {
+			t.Error("DeleteFrom() should return error for read-only layer")
+		}
+	})
+
+	t.Run("delete empty paths is no-op", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost"}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// Delete with no paths should succeed
+		err = store.DeleteFrom("test")
+		if err != nil {
+			t.Fatalf("DeleteFrom() with no paths error = %v", err)
+		}
+	})
+
+	t.Run("delete marks layer dirty", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		if store.IsDirty() {
+			t.Error("IsDirty() should be false before DeleteFrom()")
+		}
+
+		err = store.DeleteFrom("test", "/port")
+		if err != nil {
+			t.Fatalf("DeleteFrom() error = %v", err)
+		}
+
+		if !store.IsDirty() {
+			t.Error("IsDirty() should be true after DeleteFrom()")
+		}
+
+		// Save should clear dirty
+		err = store.Save(ctx)
+		if err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+
+		if store.IsDirty() {
+			t.Error("IsDirty() should be false after Save()")
+		}
+	})
+
+	t.Run("delete is preserved on reload", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("test", map[string]any{"host": "localhost", "port": 8080}), WithPriority(PriorityDefaults))
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		err = store.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		err = store.DeleteFrom("test", "/port")
+		if err != nil {
+			t.Fatalf("DeleteFrom() error = %v", err)
+		}
+
+		// Reload should preserve the deletion
+		err = store.Reload(ctx)
+		if err != nil {
+			t.Fatalf("Reload() error = %v", err)
+		}
+
+		cfg := store.Get()
+		if cfg.Port != 0 {
+			t.Errorf("After Reload() Port = %d, want 0 (deletion should be preserved)", cfg.Port)
+		}
+	})
+}
+
 func TestStore_GetAt(t *testing.T) {
 	ctx := context.Background()
 	store := New[testConfig]()

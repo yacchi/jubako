@@ -739,8 +739,102 @@ func (s *Store[T]) setToLocked(layerName layer.Name, path string, value any) (T,
 	return s.materializeLocked()
 }
 
+// DeleteFrom removes values at the specified JSON Pointer paths from a specific layer.
+// The layer's data is updated in memory, but not persisted until Save() is called.
+// If a path does not exist, it is silently skipped.
+//
+// Example:
+//
+//	// Delete a single path
+//	err := store.DeleteFrom("user", "/server/deprecated_field")
+//	if err != nil {
+//	  log.Fatal(err)
+//	}
+//
+//	// Delete multiple paths at once
+//	err = store.DeleteFrom("user", "/temp/cache", "/temp/logs", "/deprecated")
+//	if err != nil {
+//	  log.Fatal(err)
+//	}
+//
+//	// Save the changes to disk
+//	err = store.SaveLayer(ctx, "user")
+func (s *Store[T]) DeleteFrom(layerName layer.Name, paths ...string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	current, subscribers, err := s.deleteFromLocked(layerName, paths)
+	if err != nil {
+		return err
+	}
+	for _, sub := range subscribers {
+		sub.fn(current)
+	}
+	return nil
+}
+
+// deleteFromLocked performs the value deletion and materialization under lock.
+// Returns the current configuration and subscribers snapshot for notification outside the lock.
+func (s *Store[T]) deleteFromLocked(layerName layer.Name, paths []string) (T, []subscriber[T], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry := s.findLayerLocked(layerName)
+	if entry == nil {
+		var zero T
+		return zero, nil, fmt.Errorf("layer %q not found", layerName)
+	}
+
+	if !entry.Writable() {
+		var zero T
+		if entry.readOnly {
+			return zero, nil, fmt.Errorf("layer %q is marked as read-only", layerName)
+		}
+		return zero, nil, fmt.Errorf("layer %q does not support saving (source is not writable)", layerName)
+	}
+
+	if entry.data == nil {
+		var zero T
+		return zero, nil, fmt.Errorf("layer %q has not been loaded", layerName)
+	}
+
+	// Delete each path
+	anyDeleted := false
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+
+		// Attempt to delete the path
+		deleted := jsonptr.DeletePath(entry.data, path)
+		if deleted {
+			// Record the change to changeset for comment preservation
+			entry.changeset = append(entry.changeset, document.JSONPatch{
+				Op:   document.PatchOpRemove,
+				Path: path,
+			})
+			anyDeleted = true
+		}
+	}
+
+	// Only mark dirty and re-materialize if something was actually deleted
+	if !anyDeleted {
+		// Return current state without re-materializing
+		current := s.resolved.Get()
+		subscribers := append([]subscriber[T](nil), s.subscribers...)
+		return current, subscribers, nil
+	}
+
+	// Mark the layer as dirty
+	entry.dirty = true
+
+	// Re-materialize to update the resolved config
+	return s.materializeLocked()
+}
+
 // Save persists all modified (dirty) layers to their sources.
-// Only layers that have been modified via SetTo() and support saving will be persisted.
+// Only layers that have been modified via SetTo() or DeleteFrom() and support saving will be persisted.
 // After successful save, the dirty flag is cleared for each saved layer.
 //
 // Example:
