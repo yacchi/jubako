@@ -11,6 +11,7 @@ import (
 
 	"github.com/yacchi/jubako/document"
 	jjson "github.com/yacchi/jubako/format/json"
+	"github.com/yacchi/jubako/internal/tag"
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/layer/mapdata"
 	"github.com/yacchi/jubako/source"
@@ -1864,31 +1865,37 @@ func TestParseJubakoTag(t *testing.T) {
 		in            string
 		wantPath      string
 		wantRel       bool
-		wantSensitive sensitiveState
+		wantSensitive tag.SensitiveState
+		wantEnvVar    string
 	}{
-		{"", "", false, sensitiveInherit},
-		{"/a/b", "/a/b", false, sensitiveInherit},
-		{"a/b", "/a/b", true, sensitiveInherit},
-		{"./a/b", "/a/b", true, sensitiveInherit},
-		{"a/b,option", "/a/b", true, sensitiveInherit},
+		{"", "", false, tag.SensitiveInherit, ""},
+		{"/a/b", "/a/b", false, tag.SensitiveInherit, ""},
+		{"a/b", "/a/b", true, tag.SensitiveInherit, ""},
+		{"./a/b", "/a/b", true, tag.SensitiveInherit, ""},
+		{"a/b,option", "/a/b", true, tag.SensitiveInherit, ""},
 		// Sensitive directive tests
-		{"sensitive", "", false, sensitiveExplicit},
-		{"!sensitive", "", false, sensitiveExplicitNot},
-		{"/a/b,sensitive", "/a/b", false, sensitiveExplicit},
-		{"a/b,sensitive", "/a/b", true, sensitiveExplicit},
-		{"/a/b,!sensitive", "/a/b", false, sensitiveExplicitNot},
-		{"./path,sensitive", "/path", true, sensitiveExplicit},
+		{"sensitive", "", false, tag.SensitiveExplicit, ""},
+		{"!sensitive", "", false, tag.SensitiveExplicitNot, ""},
+		{"/a/b,sensitive", "/a/b", false, tag.SensitiveExplicit, ""},
+		{"a/b,sensitive", "/a/b", true, tag.SensitiveExplicit, ""},
+		{"/a/b,!sensitive", "/a/b", false, tag.SensitiveExplicitNot, ""},
+		{"./path,sensitive", "/path", true, tag.SensitiveExplicit, ""},
 		// Comma-prefixed directive (no path, explicit delimiter style)
-		{",sensitive", "", false, sensitiveExplicit},
-		{",!sensitive", "", false, sensitiveExplicitNot},
+		{",sensitive", "", false, tag.SensitiveExplicit, ""},
+		{",!sensitive", "", false, tag.SensitiveExplicitNot, ""},
 		// Multiple directives (last one wins)
-		{",sensitive,!sensitive", "", false, sensitiveExplicitNot},
+		{",sensitive,!sensitive", "", false, tag.SensitiveExplicitNot, ""},
+		// Env directive tests
+		{"env:SERVER_PORT", "", false, tag.SensitiveInherit, "SERVER_PORT"},
+		{"/port,env:SERVER_PORT", "/port", false, tag.SensitiveInherit, "SERVER_PORT"},
+		{"env:API_KEY,sensitive", "", false, tag.SensitiveExplicit, "API_KEY"},
+		{"/path,env:VAR,sensitive", "/path", false, tag.SensitiveExplicit, "VAR"},
 	}
 	for _, tt := range tests {
-		gotPath, gotRel, gotSensitive := parseJubakoTag(tt.in, DefaultTagDelimiter)
-		if gotPath != tt.wantPath || gotRel != tt.wantRel || gotSensitive != tt.wantSensitive {
-			t.Fatalf("parseJubakoTag(%q) = (%q, %v, %v), want (%q, %v, %v)",
-				tt.in, gotPath, gotRel, gotSensitive, tt.wantPath, tt.wantRel, tt.wantSensitive)
+		info := tag.ParseJubakoTag(tt.in, DefaultTagDelimiter)
+		if info.Path != tt.wantPath || info.IsRelative != tt.wantRel || info.Sensitive != tt.wantSensitive || info.EnvVar != tt.wantEnvVar {
+			t.Fatalf("tag.ParseJubakoTag(%q) = {Path:%q, IsRelative:%v, Sensitive:%v, EnvVar:%q}, want {Path:%q, IsRelative:%v, Sensitive:%v, EnvVar:%q}",
+				tt.in, info.Path, info.IsRelative, info.Sensitive, info.EnvVar, tt.wantPath, tt.wantRel, tt.wantSensitive, tt.wantEnvVar)
 		}
 	}
 }
@@ -1900,24 +1907,24 @@ func TestParseJubakoTag_CustomDelimiter(t *testing.T) {
 		delimiter     string
 		wantPath      string
 		wantRel       bool
-		wantSensitive sensitiveState
+		wantSensitive tag.SensitiveState
 	}{
 		// With semicolon delimiter, commas are part of the path
-		{"/path,with,commas", ";", "/path,with,commas", false, sensitiveInherit},
-		{"/path,with,commas;sensitive", ";", "/path,with,commas", false, sensitiveExplicit},
-		{"path,with,commas;sensitive", ";", "/path,with,commas", true, sensitiveExplicit},
-		{"./path,with,commas;!sensitive", ";", "/path,with,commas", true, sensitiveExplicitNot},
+		{"/path,with,commas", ";", "/path,with,commas", false, tag.SensitiveInherit},
+		{"/path,with,commas;sensitive", ";", "/path,with,commas", false, tag.SensitiveExplicit},
+		{"path,with,commas;sensitive", ";", "/path,with,commas", true, tag.SensitiveExplicit},
+		{"./path,with,commas;!sensitive", ";", "/path,with,commas", true, tag.SensitiveExplicitNot},
 		// Directive-only with custom delimiter
-		{"sensitive", ";", "", false, sensitiveExplicit},
-		{"!sensitive", ";", "", false, sensitiveExplicitNot},
+		{"sensitive", ";", "", false, tag.SensitiveExplicit},
+		{"!sensitive", ";", "", false, tag.SensitiveExplicitNot},
 		// With pipe delimiter
-		{"/a|b|c|sensitive", "|", "/a", false, sensitiveExplicit},
+		{"/a|b|c|sensitive", "|", "/a", false, tag.SensitiveExplicit},
 	}
 	for _, tt := range tests {
-		gotPath, gotRel, gotSensitive := parseJubakoTag(tt.in, tt.delimiter)
-		if gotPath != tt.wantPath || gotRel != tt.wantRel || gotSensitive != tt.wantSensitive {
-			t.Fatalf("parseJubakoTag(%q, %q) = (%q, %v, %v), want (%q, %v, %v)",
-				tt.in, tt.delimiter, gotPath, gotRel, gotSensitive, tt.wantPath, tt.wantRel, tt.wantSensitive)
+		info := tag.ParseJubakoTag(tt.in, tt.delimiter)
+		if info.Path != tt.wantPath || info.IsRelative != tt.wantRel || info.Sensitive != tt.wantSensitive {
+			t.Fatalf("tag.ParseJubakoTag(%q, %q) = {Path:%q, IsRelative:%v, Sensitive:%v}, want {Path:%q, IsRelative:%v, Sensitive:%v}",
+				tt.in, tt.delimiter, info.Path, info.IsRelative, info.Sensitive, tt.wantPath, tt.wantRel, tt.wantSensitive)
 		}
 	}
 }
@@ -2139,23 +2146,6 @@ func TestWalkContext_ValueAndAllValues(t *testing.T) {
 	})
 	if !saw {
 		t.Fatal("did not observe expected path in Walk")
-	}
-}
-
-func TestParseJSONTagKey(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{"", ""},
-		{"name", "name"},
-		{"name,omitempty", "name"},
-		{"-", "-"},
-	}
-	for _, tt := range tests {
-		if got := parseJSONTagKey(tt.in); got != tt.want {
-			t.Fatalf("parseJSONTagKey(%q) = %q, want %q", tt.in, got, tt.want)
-		}
 	}
 }
 

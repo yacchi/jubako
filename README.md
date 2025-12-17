@@ -30,6 +30,7 @@ items, and together they form a complete set - much like how this library manage
     - [Layer Information](#layer-information)
 - [Supported Formats](#supported-formats)
     - [Environment Variable Layer](#environment-variable-layer)
+        - [Schema-based Mapping](#schema-based-mapping)
 - [Custom Format and Source Implementation](#custom-format-and-source-implementation)
     - [Source Interface](#source-interface)
     - [Document Interface](#document-interface)
@@ -1068,11 +1069,100 @@ func main() {
 }
 ```
 
-**Note**: Environment variables are always read as strings. However, by using JSON Pointer paths with numeric segments (e.g., `APP_ITEMS_0`, `APP_SERVERS_0_HOST`), array structures can be created. For explicit type conversions (e.g., string "8080" to int 8080), you can use a custom `TransformFunc`.
+**Note**: Environment variables are always read as strings. However, by using JSON Pointer paths with numeric segments (e.g., `APP_ITEMS_0`, `APP_SERVERS_0_HOST`), array structures can be created. For explicit type conversions (e.g., string "8080" to int 8080), you can use a custom `TransformFunc` or schema-based mapping (see below).
 
-This also applies to numeric fields; `jsonptr` will attempt to convert numeric path segments to array indices. If you need explicit type conversion for the *value* (e.g., "8080" to `int 8080`), you can provide a custom `TransformFunc` to perform this.
+This also applies to numeric fields; `jsonptr` will attempt to convert numeric path segments to array indices. If you need explicit type conversion for the *value* (e.g., "8080" to `int 8080`), you can provide a custom `TransformFunc` or use schema-based mapping.
 
 See [examples/env-override](examples/env-override/) for detailed usage.
+
+#### Schema-based Mapping
+
+For type-safe environment variable mapping with automatic type conversion, use `WithSchemaMapping`.
+This eliminates the need for manual `TransformFunc` implementations by using struct tags:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/layer/env"
+)
+
+type Config struct {
+	Server   ServerConfig   `json:"server"`
+	Features []string       `json:"features" jubako:"env:FEATURES"`
+	Debug    bool           `json:"debug" jubako:"env:DEBUG"`
+}
+
+type ServerConfig struct {
+	Host    string        `json:"host" jubako:"env:SERVER_HOST"`
+	Port    int           `json:"port" jubako:"env:SERVER_PORT"`
+	Timeout time.Duration `json:"timeout" jubako:"env:SERVER_TIMEOUT"`
+}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[Config]()
+
+	// Schema-based mapping: env var names in tags do NOT include prefix
+	// APP_SERVER_HOST -> /server/host (string)
+	// APP_SERVER_PORT -> /server/port (int, auto-converted)
+	// APP_SERVER_TIMEOUT -> /server/timeout (time.Duration, auto-converted)
+	// APP_FEATURES -> /features ([]string, comma-separated)
+	// APP_DEBUG -> /debug (bool, auto-converted)
+	if err := store.Add(
+		env.New("env", "APP_", env.WithSchemaMapping[Config]()),
+		jubako.WithPriority(jubako.PriorityEnv),
+	); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := store.Load(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	config := store.Get()
+	fmt.Printf("Server: %s:%d (timeout: %v)\n",
+		config.Server.Host, config.Server.Port, config.Server.Timeout)
+	fmt.Printf("Debug: %v, Features: %v\n", config.Debug, config.Features)
+}
+```
+
+**Key features:**
+
+| Feature | Description |
+|---------|-------------|
+| Automatic type conversion | Strings are converted to the target field type (`int`, `bool`, `float64`, `time.Duration`, etc.) |
+| Prefix handling | Env var names in `jubako:"env:..."` tags do NOT include the prefix |
+| Nested struct support | Mappings work with nested structs; JSON path is built from field hierarchy |
+| Custom path override | Combine with path remapping: `jubako:"/custom/path,env:VAR_NAME"` |
+| Slice support | Comma-separated values are split into `[]string` |
+
+**Supported types:**
+
+| Type | Conversion |
+|------|------------|
+| `string` | No conversion |
+| `int`, `int8`, `int16`, `int32`, `int64` | `strconv.ParseInt` |
+| `uint`, `uint8`, `uint16`, `uint32`, `uint64` | `strconv.ParseUint` |
+| `float32`, `float64` | `strconv.ParseFloat` |
+| `bool` | `strconv.ParseBool` (accepts `true`, `false`, `1`, `0`) |
+| `[]string` | Split by comma (e.g., `"a,b,c"` → `["a", "b", "c"]`) |
+| `time.Duration` | `time.ParseDuration` (e.g., `"30s"`, `"1h30m"`) |
+
+**Example with custom path:**
+
+```go
+type Config struct {
+	// Maps APP_PORT to /server/listen_port (not /port)
+	Port int `json:"port" jubako:"/server/listen_port,env:PORT"`
+}
+```
 
 ## Custom Format and Source Implementation
 

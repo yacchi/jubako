@@ -25,6 +25,7 @@
     - [レイヤー情報](#レイヤー情報)
 - [サポートされるフォーマット](#サポートされるフォーマット)
     - [環境変数レイヤー](#環境変数レイヤー)
+        - [スキーマベースマッピング](#スキーマベースマッピング)
 - [独自フォーマット・ソースの作成](#独自フォーマットソースの作成)
     - [Source インターフェース](#source-インターフェース)
     - [Document インターフェース](#document-インターフェース)
@@ -1029,11 +1030,100 @@ func main() {
 }
 ```
 
-**注意**: 環境変数は常に文字列として読み込まれます。ただし、数値を含む JSON Pointer パス（例: `APP_ITEMS_0`, `APP_SERVERS_0_HOST`）を使用することで、配列構造を構築できます。明示的な型変換（例: 文字列 "8080" を int 8080 へ）が必要な場合は、カスタムの `TransformFunc` を使用して実現できます。
+**注意**: 環境変数は常に文字列として読み込まれます。ただし、数値を含む JSON Pointer パス（例: `APP_ITEMS_0`, `APP_SERVERS_0_HOST`）を使用することで、配列構造を構築できます。明示的な型変換（例: 文字列 "8080" を int 8080 へ）が必要な場合は、カスタムの `TransformFunc` またはスキーマベースマッピング（下記参照）を使用して実現できます。
 
-これは数値フィールドにも当てはまります。`jsonptr` は数値パスセグメントを配列インデックスに変換しようとします。*値*に対して明示的な型変換（例: "8080" から `int 8080` へ）が必要な場合は、カスタムの `TransformFunc` を提供してこれを行うことができます。
+これは数値フィールドにも当てはまります。`jsonptr` は数値パスセグメントを配列インデックスに変換しようとします。*値*に対して明示的な型変換（例: "8080" から `int 8080` へ）が必要な場合は、カスタムの `TransformFunc` またはスキーマベースマッピングを提供してこれを行うことができます。
 
 詳しい使用例は [examples/env-override](examples/env-override/) を参照してください。
+
+#### スキーマベースマッピング
+
+型安全な環境変数マッピングと自動型変換には、`WithSchemaMapping` を使用します。
+これにより、構造体タグを使用して手動の `TransformFunc` 実装が不要になります：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/yacchi/jubako"
+	"github.com/yacchi/jubako/layer/env"
+)
+
+type Config struct {
+	Server   ServerConfig   `json:"server"`
+	Features []string       `json:"features" jubako:"env:FEATURES"`
+	Debug    bool           `json:"debug" jubako:"env:DEBUG"`
+}
+
+type ServerConfig struct {
+	Host    string        `json:"host" jubako:"env:SERVER_HOST"`
+	Port    int           `json:"port" jubako:"env:SERVER_PORT"`
+	Timeout time.Duration `json:"timeout" jubako:"env:SERVER_TIMEOUT"`
+}
+
+func main() {
+	ctx := context.Background()
+	store := jubako.New[Config]()
+
+	// スキーマベースマッピング: タグ内の環境変数名はプレフィックスを含まない
+	// APP_SERVER_HOST -> /server/host (string)
+	// APP_SERVER_PORT -> /server/port (int、自動変換)
+	// APP_SERVER_TIMEOUT -> /server/timeout (time.Duration、自動変換)
+	// APP_FEATURES -> /features ([]string、カンマ区切り)
+	// APP_DEBUG -> /debug (bool、自動変換)
+	if err := store.Add(
+		env.New("env", "APP_", env.WithSchemaMapping[Config]()),
+		jubako.WithPriority(jubako.PriorityEnv),
+	); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := store.Load(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	config := store.Get()
+	fmt.Printf("Server: %s:%d (timeout: %v)\n",
+		config.Server.Host, config.Server.Port, config.Server.Timeout)
+	fmt.Printf("Debug: %v, Features: %v\n", config.Debug, config.Features)
+}
+```
+
+**主な機能:**
+
+| 機能 | 説明 |
+|-----|-----|
+| 自動型変換 | 文字列がターゲットフィールドの型に変換される（`int`、`bool`、`float64`、`time.Duration` など） |
+| プレフィックス処理 | `jubako:"env:..."` タグ内の環境変数名はプレフィックスを含まない |
+| ネスト構造体サポート | ネスト構造体にも対応、JSON パスはフィールド階層から構築 |
+| カスタムパス上書き | パスリマッピングと組み合わせ可能: `jubako:"/custom/path,env:VAR_NAME"` |
+| スライスサポート | カンマ区切り値は `[]string` に分割 |
+
+**サポートされる型:**
+
+| 型 | 変換方法 |
+|---|--------|
+| `string` | 変換なし |
+| `int`, `int8`, `int16`, `int32`, `int64` | `strconv.ParseInt` |
+| `uint`, `uint8`, `uint16`, `uint32`, `uint64` | `strconv.ParseUint` |
+| `float32`, `float64` | `strconv.ParseFloat` |
+| `bool` | `strconv.ParseBool`（`true`, `false`, `1`, `0` を受け付ける） |
+| `[]string` | カンマで分割（例: `"a,b,c"` → `["a", "b", "c"]`） |
+| `time.Duration` | `time.ParseDuration`（例: `"30s"`, `"1h30m"`） |
+
+**カスタムパスの例:**
+
+```go
+type Config struct {
+	// APP_PORT を /server/listen_port にマッピング（/port ではなく）
+	Port int `json:"port" jubako:"/server/listen_port,env:PORT"`
+}
+```
 
 ## 独自フォーマット・ソースの作成
 
