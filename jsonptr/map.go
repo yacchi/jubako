@@ -155,15 +155,18 @@ func SetByKeys(data map[string]any, keys []string, value any) SetResult {
 		if err != nil {
 			return SetResult{Success: false}
 		}
-		if idx < 0 || idx > len(arr) {
+		if idx < 0 {
 			return SetResult{Success: false}
 		}
 
-		if idx == len(arr) {
-			// Append
-			arr = append(arr, value)
+		if idx >= len(arr) {
+			// Expand array
+			newArr := make([]any, idx+1)
+			copy(newArr, arr)
+			newArr[idx] = value
+
 			// Update the parent container with the new array
-			if err := updateParentArray(data, keys[:len(keys)-1], arr); err != nil {
+			if err := updateParentArray(data, keys[:len(keys)-1], newArr); err != nil {
 				return SetResult{Success: false}
 			}
 			return SetResult{Success: true, Created: true}
@@ -246,9 +249,24 @@ func navigateToParent(data map[string]any, keys []string) (any, string, bool, bo
 			}
 		case []any:
 			idx, err := strconv.Atoi(key)
-			if err != nil || idx < 0 || idx >= len(c) {
+			if err != nil || idx < 0 {
 				return nil, "", false, false
 			}
+
+			if idx >= len(c) {
+				// Expand array
+				newArr := make([]any, idx+1)
+				copy(newArr, c)
+
+				// Update parent with expanded array
+				// The path to the current array is keys[:i]
+				if err := updateParentArray(data, keys[:i], newArr); err != nil {
+					return nil, "", false, false
+				}
+				c = newArr
+				current = newArr
+			}
+
 			elem := c[idx]
 			if m, ok := elem.(map[string]any); ok {
 				current = m

@@ -692,21 +692,35 @@ func MapToEnvVars(prefix, delimiter string, data map[string]any) []string {
 
 // flattenMap recursively flattens a nested map into environment variable format.
 func flattenMap(prefix, delimiter, currentPath string, data map[string]any, result *[]string) {
-	for key, value := range data {
-		var envKey string
-		if currentPath == "" {
-			envKey = strings.ToUpper(key)
-		} else {
-			envKey = currentPath + delimiter + strings.ToUpper(key)
-		}
+	flatten(prefix, delimiter, currentPath, data, result)
+}
 
-		switch v := value.(type) {
-		case map[string]any:
-			flattenMap(prefix, delimiter, envKey, v, result)
-		case nil:
-			// Skip nil values (env vars don't support null)
-		default:
-			*result = append(*result, fmt.Sprintf("%s%s=%v", prefix, envKey, v))
+// flatten recursively flattens any value into environment variable format.
+func flatten(prefix, delimiter, currentPath string, data any, result *[]string) {
+	switch v := data.(type) {
+	case map[string]any:
+		for key, value := range v {
+			var envKey string
+			if currentPath == "" {
+				envKey = strings.ToUpper(key)
+			} else {
+				envKey = currentPath + delimiter + strings.ToUpper(key)
+			}
+			flatten(prefix, delimiter, envKey, value, result)
 		}
+	case []any:
+		for i, value := range v {
+			var envKey string
+			if currentPath == "" {
+				envKey = fmt.Sprintf("%d", i)
+			} else {
+				envKey = fmt.Sprintf("%s%s%d", currentPath, delimiter, i)
+			}
+			flatten(prefix, delimiter, envKey, value, result)
+		}
+	case nil:
+		// Skip nil values (env vars don't support null)
+	default:
+		*result = append(*result, fmt.Sprintf("%s%s=%v", prefix, currentPath, v))
 	}
 }

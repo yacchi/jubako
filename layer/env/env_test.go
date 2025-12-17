@@ -478,7 +478,7 @@ func TestLayer_Compliance(t *testing.T) {
 	}
 	jktest.NewLayerTester(t, factory,
 		jktest.SkipNullTest("environment variables cannot represent null values"),
-		jktest.SkipArrayTest("environment variables cannot represent arrays"),
+		// jktest.SkipArrayTest("environment variables cannot represent arrays"),
 	).TestAll()
 }
 
@@ -497,4 +497,65 @@ func TestLayer_FillDetails(t *testing.T) {
 	if d.Watcher != watcher.TypeNoop {
 		t.Errorf("Watcher = %q, want %q", d.Watcher, watcher.TypeNoop)
 	}
+}
+
+func TestArraySupport(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("array using indices", func(t *testing.T) {
+		l := New("env", "APP_", WithEnvironFunc(func() []string {
+			return []string{
+				"APP_SERVERS_0=host1",
+				"APP_SERVERS_1=host2",
+			}
+		}))
+
+		data, err := l.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		val, ok := jsonptr.GetPath(data, "/servers")
+		if !ok {
+			t.Fatal("Get(/servers) should succeed")
+		}
+
+		arr, ok := val.([]any)
+		if !ok {
+			t.Fatalf("Get(/servers) should return []any, got %T", val)
+		}
+
+		if len(arr) != 2 {
+			t.Errorf("len(arr) = %d, want 2", len(arr))
+		}
+		// Indices are strings in env vars, so values are strings unless transformed
+		if arr[0] != "host1" || arr[1] != "host2" {
+			t.Errorf("arr = %v, want [host1 host2]", arr)
+		}
+	})
+
+	t.Run("nested object in array", func(t *testing.T) {
+		l := New("env", "APP_", WithEnvironFunc(func() []string {
+			return []string{
+				"APP_USERS_0_NAME=alice",
+				"APP_USERS_0_AGE=30",
+				"APP_USERS_1_NAME=bob",
+			}
+		}))
+
+		data, err := l.Load(ctx)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		val, ok := jsonptr.GetPath(data, "/users/0/name")
+		if !ok || val != "alice" {
+			t.Errorf("Get(/users/0/name) = %v, want alice", val)
+		}
+		
+		val, ok = jsonptr.GetPath(data, "/users/1/name")
+		if !ok || val != "bob" {
+			t.Errorf("Get(/users/1/name) = %v, want bob", val)
+		}
+	})
 }

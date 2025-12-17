@@ -646,13 +646,23 @@ func TestArrayOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("SetByKeys fails on out of range array index", func(t *testing.T) {
+	t.Run("SetByKeys expands array on out of range array index", func(t *testing.T) {
 		data := map[string]any{
 			"items": []any{"a"},
 		}
-		res := SetByKeys(data, []string{"items", "5"}, "x")
-		if res.Success {
-			t.Fatalf("SetByKeys() Success=true, want false")
+		res := SetByKeys(data, []string{"items", "2"}, "x")
+		if !res.Success || !res.Created {
+			t.Fatalf("SetByKeys() result = %+v", res)
+		}
+		items := data["items"].([]any)
+		if len(items) != 3 {
+			t.Fatalf("len(items) = %d, want 3", len(items))
+		}
+		if items[1] != nil {
+			t.Errorf("items[1] = %v, want nil", items[1])
+		}
+		if items[2] != "x" {
+			t.Errorf("items[2] = %v, want x", items[2])
 		}
 	})
 
@@ -746,13 +756,25 @@ func TestArrayOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("SetByKeys fails on out of range array index during navigation", func(t *testing.T) {
+	t.Run("SetByKeys expands array on out of range array index during navigation", func(t *testing.T) {
 		data := map[string]any{
 			"items": []any{"a"},
 		}
-		res := SetByKeys(data, []string{"items", "5", "key"}, "value")
-		if res.Success {
-			t.Fatalf("SetByKeys() Success=true, want false")
+		// items[2] (index 1 is skipped) should become a map with "key"="value"
+		res := SetByKeys(data, []string{"items", "2", "key"}, "value")
+		if !res.Success {
+			t.Fatalf("SetByKeys() result = %+v", res)
+		}
+		items := data["items"].([]any)
+		if len(items) != 3 {
+			t.Fatalf("len(items) = %d, want 3", len(items))
+		}
+		if items[1] != nil {
+			t.Errorf("items[1] = %v, want nil", items[1])
+		}
+		item2, ok := items[2].(map[string]any)
+		if !ok || item2["key"] != "value" {
+			t.Errorf("items[2] = %v, want map with key=value", items[2])
 		}
 	})
 
@@ -1060,15 +1082,22 @@ func TestEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("SetByKeys array out of range via nested path", func(t *testing.T) {
+	t.Run("SetByKeys expands array via nested path", func(t *testing.T) {
 		data := map[string]any{
 			"parent": map[string]any{
 				"items": []any{"a"},
 			},
 		}
-		res := SetByKeys(data, []string{"parent", "items", "5"}, "x")
-		if res.Success {
-			t.Fatalf("SetByKeys() Success=true, want false")
+		res := SetByKeys(data, []string{"parent", "items", "2"}, "x")
+		if !res.Success {
+			t.Fatalf("SetByKeys() result = %+v", res)
+		}
+		items := data["parent"].(map[string]any)["items"].([]any)
+		if len(items) != 3 {
+			t.Fatalf("len(items) = %d, want 3", len(items))
+		}
+		if items[2] != "x" {
+			t.Errorf("items[2] = %v, want x", items[2])
 		}
 	})
 
@@ -1209,16 +1238,24 @@ func TestEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("SetByKeys isArrayParent with out of range final index", func(t *testing.T) {
+	t.Run("SetByKeys isArrayParent with out of range final index expands array", func(t *testing.T) {
 		// When parent is array and final key is out of range
 		data := map[string]any{
 			"outer": []any{
 				[]any{"a"},
 			},
 		}
-		res := SetByKeys(data, []string{"outer", "0", "5"}, "x")
-		if res.Success {
-			t.Fatalf("SetByKeys() Success=true, want false")
+		res := SetByKeys(data, []string{"outer", "0", "2"}, "x")
+		if !res.Success {
+			t.Fatalf("SetByKeys() result = %+v", res)
+		}
+		outer := data["outer"].([]any)
+		inner := outer[0].([]any)
+		if len(inner) != 3 {
+			t.Fatalf("len(inner) = %d, want 3", len(inner))
+		}
+		if inner[2] != "x" {
+			t.Errorf("inner[2] = %v, want x", inner[2])
 		}
 	})
 
@@ -1383,14 +1420,21 @@ func TestEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("SetByKeys direct array parent out of range fails", func(t *testing.T) {
+	t.Run("SetByKeys direct array parent out of range expands array", func(t *testing.T) {
 		// Trigger isArrayParent=true branch: parent is array, index > len
 		data := map[string]any{
 			"items": []any{"a"},
 		}
-		res := SetByKeys(data, []string{"items", "5"}, "x")
-		if res.Success {
-			t.Fatalf("SetByKeys() Success=true, want false")
+		res := SetByKeys(data, []string{"items", "2"}, "x")
+		if !res.Success {
+			t.Fatalf("SetByKeys() result = %+v", res)
+		}
+		items := data["items"].([]any)
+		if len(items) != 3 {
+			t.Fatalf("len(items) = %d, want 3", len(items))
+		}
+		if items[2] != "x" {
+			t.Errorf("items[2] = %v, want x", items[2])
 		}
 	})
 
