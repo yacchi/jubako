@@ -488,3 +488,106 @@ func TestSensitiveMasking(t *testing.T) {
 		}
 	})
 }
+
+func TestSensitiveMapping(t *testing.T) {
+	t.Run("absolute path remapping", func(t *testing.T) {
+		// Test case from backlog-cli issue where absolute path mapping caused sensitive attribute to be ignored
+		type ServerConfig struct {
+			CookieSecret string `json:"cookie_secret" jubako:"/server/cookie/secret,env:COOKIE_SECRET,sensitive"`
+		}
+
+		type Config struct {
+			Server ServerConfig `json:"server"`
+		}
+
+		store := New[Config](
+			WithSensitiveMaskString("********"),
+		)
+
+		err := store.Add(
+			mapdata.New("data", map[string]any{
+				"server": map[string]any{
+					"cookie": map[string]any{
+						"secret": "my-secret-value",
+					},
+				},
+			}),
+		)
+		if err != nil {
+			t.Fatalf("failed to add layer: %v", err)
+		}
+
+		if err := store.Load(context.Background()); err != nil {
+			t.Fatalf("failed to load: %v", err)
+		}
+
+		// Verify Walk recognizes sensitive path
+		found := false
+		store.Walk(func(ctx WalkContext) bool {
+			if ctx.Path == "/server/cookie/secret" {
+				found = true
+				val := ctx.Value()
+				if val.Value != "********" {
+					t.Errorf("Sensitive attribute failed in Walk! Expected masked value for %s, got %v", ctx.Path, val.Value)
+				}
+			}
+			return true
+		})
+
+		if !found {
+			t.Error("path /server/cookie/secret not found in Walk")
+		}
+
+		// Verify GetAt recognizes sensitive path (source path)
+		rv := store.GetAt("/server/cookie/secret")
+		if !rv.Exists {
+			t.Error("path /server/cookie/secret not found in GetAt")
+		} else if rv.Value != "********" {
+			t.Errorf("Sensitive attribute failed in GetAt! Expected masked value, got %v", rv.Value)
+		}
+
+		// Application struct should have raw value
+		cfg := store.Get()
+		if cfg.Server.CookieSecret != "my-secret-value" {
+			t.Errorf("Expected raw value in struct, got %v", cfg.Server.CookieSecret)
+		}
+	})
+
+	t.Run("relative path renaming", func(t *testing.T) {
+		// Test case for field renaming via relative path
+		type Config struct {
+			Password string `json:"pw" jubako:"secret,sensitive"`
+		}
+
+		store := New[Config](
+			WithSensitiveMaskString("********"),
+		)
+
+		err := store.Add(
+			mapdata.New("data", map[string]any{
+				"secret": "my-password",
+			}),
+		)
+		if err != nil {
+			t.Fatalf("failed to add layer: %v", err)
+		}
+
+		if err := store.Load(context.Background()); err != nil {
+			t.Fatalf("failed to load: %v", err)
+		}
+
+		// Source path is "/secret" - should be masked
+		rv := store.GetAt("/secret")
+		if !rv.Exists {
+			t.Error("path /secret not found in GetAt")
+		} else if rv.Value != "********" {
+			t.Errorf("Expected masked value for source path /secret, got %v", rv.Value)
+		}
+
+		// Structural path is "/pw" - does not exist in source layers
+		rv2 := store.GetAt("/pw")
+		if rv2.Exists {
+			t.Errorf("Expected structural path /pw to not exist in GetAt, but it exists with value %v", rv2.Value)
+		}
+	})
+}
