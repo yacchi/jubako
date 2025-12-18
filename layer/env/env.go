@@ -182,6 +182,8 @@ var _ layer.Layer = (*Layer)(nil)
 //
 //	// Use transform function for custom key mapping
 //	env.New("env", "APP_", env.WithTransformFunc(myTransformFunc))
+//
+// For automatic schema mapping from Store's type T, use NewWithAutoSchema instead.
 func New(name layer.Name, prefix string, opts ...Option) *Layer {
 	l := &Layer{
 		name:      name,
@@ -278,4 +280,35 @@ func (l *Layer) FillDetails(d *types.Details) {
 // once at startup and don't support watching for changes.
 func (l *Layer) Watch(opts ...layer.WatchOption) (layer.LayerWatcher, error) {
 	return layer.NewNoopLayerWatcher(), nil
+}
+
+// NewWithAutoSchema creates a new environment variable layer that automatically
+// builds schema mapping from the Store's configuration type T.
+//
+// When Store.Add is called, the Store passes its type T via StoreProvider,
+// and the schema mapping is built automatically from T's struct tags.
+//
+// This eliminates the need to specify the type twice (once in Store.New[T] and
+// once in env.WithSchemaMapping[T]).
+//
+// Example:
+//
+//	type Config struct {
+//	    Port int    `json:"port" jubako:"env:SERVER_PORT"`
+//	    Host string `json:"host" jubako:"env:SERVER_HOST"`
+//	}
+//
+//	store := jubako.New[Config]()
+//	store.Add(env.NewWithAutoSchema("env", "APP_"))
+//	// APP_SERVER_PORT=8080 -> /port = 8080
+//	// APP_SERVER_HOST=localhost -> /host = "localhost"
+func NewWithAutoSchema(name layer.Name, prefix string, opts ...Option) layer.Layer {
+	return layer.StoreAwareLayerFunc(func(provider layer.StoreProvider) layer.Layer {
+		l := New(name, prefix, opts...)
+		if provider != nil {
+			schema := buildSchemaMappingFromType(provider.SchemaType(), "")
+			l.transform = schema.CreateTransformFunc()
+		}
+		return l
+	})
 }

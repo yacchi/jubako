@@ -376,6 +376,9 @@ func WithTagName(name string) StoreOption {
 //
 // Get() returns a snapshot of the current resolved configuration.
 // Use Subscribe() to react to updates across Load/Reload.
+//
+// Store implements layer.StoreProvider, allowing layers to access store-level
+// configuration during initialization.
 type Store[T any] struct {
 	// layers holds all registered configuration layers
 	layers []*layerEntry
@@ -406,6 +409,12 @@ type Store[T any] struct {
 	// sensitiveMask is the function used to mask sensitive values in GetAt and Walk.
 	// If nil, sensitive values are returned as-is.
 	sensitiveMask SensitiveMaskFunc
+
+	// tagDelimiter is the delimiter used in jubako struct tags
+	tagDelimiter string
+
+	// tagName is the struct tag name used for field name resolution
+	tagName string
 
 	// mu protects layers, origins, and subscribers
 	mu sync.RWMutex
@@ -452,13 +461,41 @@ func New[T any](opts ...StoreOption) *Store[T] {
 		decoder:       options.decoder,
 		mappingTable:  table,
 		sensitiveMask: options.sensitiveMask,
+		tagDelimiter:  options.tagDelimiter,
+		tagName:       options.tagName,
 	}
+}
+
+// Ensure Store implements layer.StoreProvider interface.
+var _ layer.StoreProvider = (*Store[struct{}])(nil)
+
+// SchemaType returns the reflect.Type of the Store's configuration struct T.
+// This implements layer.StoreProvider.
+func (s *Store[T]) SchemaType() reflect.Type {
+	var zero T
+	return reflect.TypeOf(zero)
+}
+
+// TagDelimiter returns the delimiter used in jubako struct tags.
+// This implements layer.StoreProvider.
+func (s *Store[T]) TagDelimiter() string {
+	return s.tagDelimiter
+}
+
+// FieldTagName returns the struct tag name used for field name resolution.
+// This implements layer.StoreProvider.
+func (s *Store[T]) FieldTagName() string {
+	return s.tagName
 }
 
 // Add registers a new configuration layer.
 // If WithPriority option is provided, layers are sorted by priority (higher overrides lower).
 // If no priority is specified, layers are processed in the order they were added.
 // If a layer with the same name already exists, it returns an error.
+//
+// If the layer was created with layer.Init(), it will be initialized with this Store
+// as the StoreProvider, allowing layers to access store-level configuration
+// (such as SchemaType for env layers).
 //
 // Note: Add does not automatically load the layer. Call Load() or Reload() to load all layers.
 //
@@ -471,7 +508,15 @@ func New[T any](opts ...StoreOption) *Store[T] {
 //	// Without priority (processed in addition order)
 //	store.Add(layer.New("base", bytes.FromString(baseYAML), yaml.New()))
 //	store.Add(layer.New("override", bytes.FromString(overrideYAML), yaml.New()))
+//
+//	// Env layer with auto schema (uses Store's type T for schema mapping)
+//	store.Add(env.NewWithAutoSchema("env", "APP_"))
 func (s *Store[T]) Add(l layer.Layer, opts ...AddOption) error {
+	// If the layer implements StoreAwareLayerInitializer, initialize it with this Store
+	if lazy, ok := l.(layer.StoreAwareLayerInitializer); ok {
+		l = lazy.InitWithStore(s)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
