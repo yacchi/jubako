@@ -46,7 +46,7 @@ func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
 
 	// Convert merged map to type T
 	// 1. Apply path remapping based on pre-built mapping table (from jubako struct tags)
-	remapped := applyMappings(merged, s.mappingTable)
+	remapped := applyMappings(merged, s.schema.Table)
 
 	// 2. Decode using the configured decoder
 	var result T

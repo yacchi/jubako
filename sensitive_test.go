@@ -271,11 +271,12 @@ func TestLayerInfoSensitive(t *testing.T) {
 	}
 }
 
-func TestMappingTableIsSensitive(t *testing.T) {
-	// Test the MappingTable.IsSensitive method directly
+func TestMappingTrieIsSensitive(t *testing.T) {
+	// Test the MappingTrie.IsSensitive method directly
 	// Note: With explicit-only sensitive marking, only leaf fields with
 	// explicit `jubako:"sensitive"` tag are considered sensitive.
 	table := buildMappingTable(reflect.TypeOf(sensitiveTestConfig{}), DefaultTagDelimiter, DefaultFieldTagName)
+	trie := NewMappingTrie(table)
 
 	tests := []struct {
 		path          string
@@ -293,7 +294,7 @@ func TestMappingTableIsSensitive(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := table.IsSensitive(tt.path)
+		got := trie.IsSensitive(tt.path)
 		if got != tt.wantSensitive {
 			t.Errorf("IsSensitive(%q) = %v, want %v", tt.path, got, tt.wantSensitive)
 		}
@@ -590,4 +591,102 @@ func TestSensitiveMapping(t *testing.T) {
 			t.Errorf("Expected structural path /pw to not exist in GetAt, but it exists with value %v", rv2.Value)
 		}
 	})
+}
+
+// Benchmarks for MappingTrie
+
+// BenchmarkMappingTrieIsSensitive benchmarks the IsSensitive method.
+func BenchmarkMappingTrieIsSensitive(b *testing.B) {
+	table := buildMappingTable(reflect.TypeOf(sensitiveTestConfig{}), DefaultTagDelimiter, DefaultFieldTagName)
+	trie := NewMappingTrie(table)
+
+	paths := []string{
+		"/credentials/api_key",     // sensitive
+		"/credentials/password",    // sensitive
+		"/credentials/public_key",  // not sensitive
+		"/database/password",       // sensitive
+		"/database/host",           // not sensitive
+		"/app/name",                // not sensitive
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, path := range paths {
+			_ = trie.IsSensitive(path)
+		}
+	}
+}
+
+// BenchmarkMappingTrieBuild benchmarks building a MappingTrie from MappingTable.
+func BenchmarkMappingTrieBuild(b *testing.B) {
+	table := buildMappingTable(reflect.TypeOf(sensitiveTestConfig{}), DefaultTagDelimiter, DefaultFieldTagName)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NewMappingTrie(table)
+	}
+}
+
+// deepNestedConfig is used for benchmarking with deeply nested structures.
+type deepNestedConfig struct {
+	Level1 struct {
+		Level2 struct {
+			Level3 struct {
+				Level4 struct {
+					Secret string `json:"secret" jubako:"sensitive"`
+					Normal string `json:"normal"`
+				} `json:"level4"`
+			} `json:"level3"`
+		} `json:"level2"`
+	} `json:"level1"`
+	Other struct {
+		Data string `json:"data"`
+	} `json:"other"`
+}
+
+// BenchmarkMappingTrieDeepNested benchmarks IsSensitive with deeply nested paths.
+func BenchmarkMappingTrieDeepNested(b *testing.B) {
+	table := buildMappingTable(reflect.TypeOf(deepNestedConfig{}), DefaultTagDelimiter, DefaultFieldTagName)
+	trie := NewMappingTrie(table)
+
+	paths := []string{
+		"/level1/level2/level3/level4/secret", // sensitive, deep
+		"/level1/level2/level3/level4/normal", // not sensitive, deep
+		"/other/data",                          // not sensitive, shallow
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, path := range paths {
+			_ = trie.IsSensitive(path)
+		}
+	}
+}
+
+// sliceElementConfig is used for benchmarking with slice elements containing sensitive fields.
+type sliceElementConfig struct {
+	Items []struct {
+		ID     string `json:"id"`
+		Secret string `json:"secret" jubako:"sensitive"`
+	} `json:"items"`
+}
+
+// BenchmarkMappingTrieSliceWildcard benchmarks IsSensitive with wildcard matching for slice indices.
+func BenchmarkMappingTrieSliceWildcard(b *testing.B) {
+	table := buildMappingTable(reflect.TypeOf(sliceElementConfig{}), DefaultTagDelimiter, DefaultFieldTagName)
+	trie := NewMappingTrie(table)
+
+	paths := []string{
+		"/items/0/secret", // sensitive via wildcard
+		"/items/1/secret", // sensitive via wildcard
+		"/items/99/secret", // sensitive via wildcard
+		"/items/0/id",      // not sensitive
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, path := range paths {
+			_ = trie.IsSensitive(path)
+		}
+	}
 }

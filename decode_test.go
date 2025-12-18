@@ -394,13 +394,17 @@ func TestMappingTable(t *testing.T) {
 		t.Error("HasMappings() = false, want true")
 	}
 
-	// Check MappingTable
-	table := store.MappingTable()
+	// Check Schema
+	schema := store.Schema()
+	if schema == nil {
+		t.Fatal("Schema() returned nil")
+	}
+	table := schema.Table
 	if table == nil {
-		t.Fatal("MappingTable() returned nil")
+		t.Fatal("Schema().Table returned nil")
 	}
 
-	t.Logf("MappingTable:\n%s", table)
+	t.Logf("Schema:\n%s", schema)
 
 	// Verify mappings programmatically
 	if len(table.Mappings) != 4 {
@@ -549,7 +553,7 @@ func TestDecodeWithTags_SliceElementRelativePaths(t *testing.T) {
 	}
 
 	store := New[ClusterConfig]()
-	t.Logf("Mapping Table:\n%s", store.MappingTable())
+	t.Logf("Schema:\n%s", store.Schema())
 
 	err := store.Add(mapdata.New("config", data))
 	if err != nil {
@@ -624,7 +628,7 @@ func TestDecodeWithTags_MapValueRelativePaths(t *testing.T) {
 	}
 
 	store := New[Config]()
-	t.Logf("Mapping Table:\n%s", store.MappingTable())
+	t.Logf("Schema:\n%s", store.Schema())
 
 	err := store.Add(mapdata.New("config", data))
 	if err != nil {

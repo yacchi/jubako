@@ -402,9 +402,11 @@ type Store[T any] struct {
 	// If nil, the default JSON-based decoder is used
 	decoder MapDecoder
 
-	// mappingTable holds pre-computed path mappings from jubako struct tags
-	// Built once at initialization, used during every materialize and SetTo validation
-	mappingTable *MappingTable
+	// schema holds the pre-computed mapping structure from jubako struct tags.
+	// Built once at initialization, used during every materialize and SetTo validation.
+	// Contains both the hierarchical MappingTable (for transformation) and
+	// the flat MappingTrie (for path-based lookups).
+	schema *Schema
 
 	// sensitiveMask is the function used to mask sensitive values in GetAt and Walk.
 	// If nil, sensitive values are returned as-is.
@@ -451,6 +453,9 @@ func New[T any](opts ...StoreOption) *Store[T] {
 	// Build mapping table from T's struct tags at initialization time
 	table := buildMappingTable(reflect.TypeOf(zero), options.tagDelimiter, options.tagName)
 
+	// Build schema containing both table and trie
+	schema := NewSchema(table)
+
 	return &Store[T]{
 		layers:        make([]*layerEntry, 0),
 		resolved:      NewCell(zero),
@@ -459,7 +464,7 @@ func New[T any](opts ...StoreOption) *Store[T] {
 		nextSubID:     1,
 		priorityStep:  options.priorityStep,
 		decoder:       options.decoder,
-		mappingTable:  table,
+		schema:        schema,
 		sensitiveMask: options.sensitiveMask,
 		tagDelimiter:  options.tagDelimiter,
 		tagName:       options.tagName,
@@ -797,7 +802,7 @@ func (s *Store[T]) setToLocked(layerName layer.Name, path string, value any) (T,
 	}
 
 	// Validate sensitivity: ensure sensitive fields only go to sensitive layers and vice versa
-	if err := validateSensitivity(s.mappingTable, path, entry.sensitive); err != nil {
+	if err := validateSensitivity(s.schema.Trie, path, entry.sensitive); err != nil {
 		var zero T
 		return zero, nil, fmt.Errorf("%w: path %s, layer %s", err, path, layerName)
 	}
@@ -942,7 +947,7 @@ func (s *Store[T]) setLocked(layerName layer.Name, opts []SetOption) (T, []subsc
 		}
 
 		// Validate sensitivity
-		if err := validateSensitivity(s.mappingTable, pv.path, entry.sensitive); err != nil {
+		if err := validateSensitivity(s.schema.Trie, pv.path, entry.sensitive); err != nil {
 			var zero T
 			return zero, nil, fmt.Errorf("%w: path %s, layer %s", err, pv.path, layerName)
 		}
@@ -1230,7 +1235,7 @@ func (s *Store[T]) applyMaskLocked(rv ResolvedValue, path string) ResolvedValue 
 	}
 
 	// Check if path is sensitive
-	if !s.mappingTable.IsSensitive(path) {
+	if !s.schema.Trie.IsSensitive(path) {
 		return rv
 	}
 
@@ -1390,7 +1395,7 @@ func (s *Store[T]) Walk(fn func(ctx WalkContext) bool) {
 			Path:      path,
 			origin:    orig,
 			maskFunc:  s.sensitiveMask,
-			sensitive: s.mappingTable.IsSensitive(path),
+			sensitive: s.schema.Trie.IsSensitive(path),
 		}
 
 		if !fn(ctx) {
@@ -1459,26 +1464,33 @@ func (s *Store[T]) IsDirty() bool {
 	return false
 }
 
-// MappingTable returns the path mapping table derived from jubako struct tags.
+// Schema returns the schema derived from jubako struct tags.
+// The Schema contains both the hierarchical MappingTable (for transformation)
+// and the flat MappingTrie (for path-based lookups).
+//
 // Returns nil if the type T has no jubako tag mappings.
-// The returned MappingTable can be inspected programmatically or printed via String().
 //
 // Example:
 //
 //	store := jubako.New[ServerConfig]()
-//	table := store.MappingTable()
-//	if table != nil {
-//	    for _, m := range table.Mappings {
+//	schema := store.Schema()
+//	if schema != nil {
+//	    // Access the table for field iteration
+//	    for _, m := range schema.Table.Mappings {
 //	        fmt.Printf("%s <- %s\n", m.FieldKey, m.SourcePath)
+//	    }
+//	    // Use the trie for path-based lookups
+//	    if m := schema.Trie.Lookup("/server/password"); m != nil {
+//	        fmt.Printf("Found mapping: %s, sensitive: %v\n", m.FieldKey, m.Sensitive)
 //	    }
 //	}
 //	// Or simply print:
-//	fmt.Println(table)
-func (s *Store[T]) MappingTable() *MappingTable {
-	return s.mappingTable
+//	fmt.Println(schema)
+func (s *Store[T]) Schema() *Schema {
+	return s.schema
 }
 
 // HasMappings returns true if the struct type T has any jubako tag mappings defined.
 func (s *Store[T]) HasMappings() bool {
-	return s.mappingTable != nil && !s.mappingTable.IsEmpty()
+	return s.schema != nil && s.schema.Table != nil && !s.schema.Table.IsEmpty()
 }

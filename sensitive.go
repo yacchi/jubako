@@ -31,8 +31,8 @@ const DefaultMaskString = "********"
 // Note: Non-sensitive fields CAN be written to sensitive layers. This allows storing
 // related but non-sensitive data (e.g., account IDs) alongside sensitive data in
 // secure storage locations.
-func validateSensitivity(table *MappingTable, path string, layerSensitive bool) error {
-	fieldSensitive := table.IsSensitive(path)
+func validateSensitivity(trie *MappingTrie, path string, layerSensitive bool) error {
+	fieldSensitive := trie.IsSensitive(path)
 
 	if fieldSensitive && !layerSensitive {
 		return ErrSensitiveFieldToNormalLayer
