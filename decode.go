@@ -25,9 +25,8 @@ type sensitiveState = tag.SensitiveState
 
 // Sensitivity state constants.
 const (
-	sensitiveInherit    = tag.SensitiveInherit
-	sensitiveExplicit   = tag.SensitiveExplicit
-	sensitiveExplicitNot = tag.SensitiveExplicitNot
+	sensitiveNone     = tag.SensitiveNone
+	sensitiveExplicit = tag.SensitiveExplicit
 )
 
 // MapDecoder is a function that decodes a map[string]any into a target struct.
@@ -68,10 +67,6 @@ type MappingTable struct {
 	SliceElement map[string]*MappingTable
 	// MapValue contains mapping table for map value type (if map with struct values).
 	MapValue map[string]*MappingTable
-
-	// sensitive is the sensitivity state of this table's struct itself.
-	// Used for inheriting sensitivity to nested fields.
-	sensitive sensitiveState
 }
 
 // buildMappingTable creates a mapping table for the given struct type.
@@ -79,11 +74,22 @@ type MappingTable struct {
 // The delimiter is used to separate path and directives in jubako struct tags.
 // The fieldTagName specifies which struct tag to use for field name resolution (e.g., "json", "yaml").
 func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *MappingTable {
+	return buildMappingTableWithPath(t, delimiter, fieldTagName, "")
+}
+
+// buildMappingTableWithPath creates a mapping table with type path tracking for warnings.
+func buildMappingTableWithPath(t reflect.Type, delimiter string, fieldTagName string, typePath string) *MappingTable {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
 		return nil
+	}
+
+	// Build type path for warnings
+	currentTypePath := t.Name()
+	if typePath != "" {
+		currentTypePath = typePath
 	}
 
 	table := &MappingTable{
@@ -110,6 +116,9 @@ func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *M
 			continue
 		}
 
+		// Check for sensitive tag on non-leaf types and emit warning
+		checkSensitiveOnNonLeaf(currentTypePath, field, tagInfo)
+
 		// Create PathMapping if jubako tag has relevant directives
 		if tagInfo.Skipped {
 			m := &PathMapping{
@@ -118,7 +127,7 @@ func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *M
 			}
 			table.Mappings = append(table.Mappings, m)
 			table.MappingByKey[tagInfo.FieldKey] = m
-		} else if tagInfo.Path != "" || tagInfo.Sensitive != sensitiveInherit {
+		} else if tagInfo.Path != "" || tagInfo.Sensitive == sensitiveExplicit {
 			m := &PathMapping{
 				FieldKey:   tagInfo.FieldKey,
 				SourcePath: tagInfo.Path,
@@ -135,10 +144,13 @@ func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *M
 			fieldType = fieldType.Elem()
 		}
 
+		// Build nested type path for warnings
+		nestedTypePath := currentTypePath + "." + field.Name
+
 		switch fieldType.Kind() {
 		case reflect.Struct:
 			// Recursively build mapping table for nested struct
-			if nested := buildMappingTable(fieldType, delimiter, fieldTagName); nested != nil && !nested.IsEmpty() {
+			if nested := buildMappingTableWithPath(fieldType, delimiter, fieldTagName, nestedTypePath); nested != nil && !nested.IsEmpty() {
 				table.Nested[tagInfo.FieldKey] = nested
 			}
 
@@ -149,7 +161,8 @@ func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *M
 				elemType = elemType.Elem()
 			}
 			if elemType.Kind() == reflect.Struct {
-				if elemTable := buildMappingTable(elemType, delimiter, fieldTagName); elemTable != nil && !elemTable.IsEmpty() {
+				elemTypePath := nestedTypePath + "[]"
+				if elemTable := buildMappingTableWithPath(elemType, delimiter, fieldTagName, elemTypePath); elemTable != nil && !elemTable.IsEmpty() {
 					table.SliceElement[tagInfo.FieldKey] = elemTable
 				}
 			}
@@ -161,7 +174,8 @@ func buildMappingTable(t reflect.Type, delimiter string, fieldTagName string) *M
 				valueType = valueType.Elem()
 			}
 			if valueType.Kind() == reflect.Struct {
-				if valueTable := buildMappingTable(valueType, delimiter, fieldTagName); valueTable != nil && !valueTable.IsEmpty() {
+				mapTypePath := nestedTypePath + "[key]"
+				if valueTable := buildMappingTableWithPath(valueType, delimiter, fieldTagName, mapTypePath); valueTable != nil && !valueTable.IsEmpty() {
 					table.MapValue[tagInfo.FieldKey] = valueTable
 				}
 			}
@@ -214,7 +228,8 @@ func (t *MappingTable) IsEmpty() bool {
 }
 
 // IsSensitive checks if the given JSONPointer path is sensitive.
-// It traverses the mapping table hierarchy and handles sensitivity inheritance.
+// A field is sensitive only if it is explicitly marked with `jubako:"sensitive"`.
+// Sensitivity is NOT inherited from parent fields.
 func (t *MappingTable) IsSensitive(path string) bool {
 	if t == nil {
 		return false
@@ -226,69 +241,52 @@ func (t *MappingTable) IsSensitive(path string) bool {
 		return false
 	}
 
-	return t.isSensitiveRecursive(segments, false)
+	return t.isSensitiveRecursive(segments)
 }
 
-// isSensitiveRecursive traverses the mapping table to determine sensitivity.
-// parentSensitive indicates if an ancestor was marked sensitive.
-func (t *MappingTable) isSensitiveRecursive(segments []string, parentSensitive bool) bool {
+// isSensitiveRecursive traverses the mapping table to find the leaf field
+// and checks if it is explicitly marked as sensitive.
+func (t *MappingTable) isSensitiveRecursive(segments []string) bool {
 	if t == nil || len(segments) == 0 {
-		return parentSensitive
+		return false
 	}
 
 	key := segments[0]
 	remaining := segments[1:]
 
-	// Check if this table itself is marked sensitive (for nested structs)
-	currentSensitive := parentSensitive
-	if t.sensitive == sensitiveExplicit {
-		currentSensitive = true
-	} else if t.sensitive == sensitiveExplicitNot {
-		currentSensitive = false
-	}
-
-	// Look for this key in MappingByKey (O(1) lookup) to check field-level sensitivity
-	if m, ok := t.MappingByKey[key]; ok {
-		// Determine sensitivity for this specific field
-		switch m.Sensitive {
-		case sensitiveExplicit:
-			currentSensitive = true
-		case sensitiveExplicitNot:
-			currentSensitive = false
-			// sensitiveInherit: keep currentSensitive
-		}
-	}
-
-	// If no more segments, return current sensitivity
+	// If this is the last segment, check if the field is explicitly sensitive
 	if len(remaining) == 0 {
-		return currentSensitive
+		if m, ok := t.MappingByKey[key]; ok {
+			return m.Sensitive == sensitiveExplicit
+		}
+		return false
 	}
 
 	// Look for nested table
 	if nested, ok := t.Nested[key]; ok {
-		return nested.isSensitiveRecursive(remaining, currentSensitive)
+		return nested.isSensitiveRecursive(remaining)
 	}
 
 	// Check slice element (for paths like /items/0/field)
 	if elemTable, ok := t.SliceElement[key]; ok {
 		// Skip the index segment (e.g., "0") and continue with the rest
 		if len(remaining) > 1 {
-			return elemTable.isSensitiveRecursive(remaining[1:], currentSensitive)
+			return elemTable.isSensitiveRecursive(remaining[1:])
 		}
-		return currentSensitive
+		return false
 	}
 
 	// Check map value (for paths like /settings/key/field)
 	if valueTable, ok := t.MapValue[key]; ok {
 		// Skip the key segment and continue with the rest
 		if len(remaining) > 1 {
-			return valueTable.isSensitiveRecursive(remaining[1:], currentSensitive)
+			return valueTable.isSensitiveRecursive(remaining[1:])
 		}
-		return currentSensitive
+		return false
 	}
 
-	// No nested table found, return inherited sensitivity
-	return currentSensitive
+	// No mapping found
+	return false
 }
 
 // applyMappings applies the mapping table to transform the source map.

@@ -22,13 +22,11 @@ const (
 type SensitiveState int
 
 const (
-	// SensitiveInherit means the field inherits sensitivity from its parent.
-	SensitiveInherit SensitiveState = iota
+	// SensitiveNone means the field is not sensitive (default).
+	SensitiveNone SensitiveState = iota
 	// SensitiveExplicit means the field is explicitly marked as sensitive.
+	// Use `jubako:"sensitive"` or `jubako:"sensitive=true"` to mark a field.
 	SensitiveExplicit
-	// SensitiveExplicitNot means the field is explicitly marked as NOT sensitive,
-	// overriding any inherited sensitivity.
-	SensitiveExplicitNot
 )
 
 // FieldInfo contains all parsed tag information for a struct field.
@@ -72,7 +70,7 @@ type FieldInfo struct {
 // The jubako tag is used for path remapping, sensitivity, and env var mapping.
 func Parse(field reflect.StructField, fieldTagName string, jubakoDelimiter string) FieldInfo {
 	info := FieldInfo{
-		Sensitive: SensitiveInherit,
+		Sensitive: SensitiveNone,
 		FieldType: unwrapPointer(field.Type),
 	}
 
@@ -134,14 +132,13 @@ func ParseFieldKey(field reflect.StructField, tagName string) string {
 //   - "./path/to/value" - relative path (explicit, "./" is stripped)
 //
 // Directives (delimiter-separated, default ","):
-//   - "sensitive" - marks field as containing sensitive data
-//   - "!sensitive" - explicitly marks field as NOT sensitive (overrides inheritance)
+//   - "sensitive" or "sensitive=true" - marks field as containing sensitive data
 //   - "env:VAR_NAME" - maps environment variable VAR_NAME to this field
 //
 // Examples (with default delimiter ","):
 //   - `jubako:"sensitive"` - sensitive field, no path remap
+//   - `jubako:"sensitive=true"` - same as above (explicit form)
 //   - `jubako:"/path,sensitive"` - sensitive field with absolute path remap
-//   - `jubako:"!sensitive"` - explicitly non-sensitive (opts out of inherited sensitivity)
 //   - `jubako:"env:SERVER_PORT"` - map env var SERVER_PORT to this field
 //   - `jubako:"/path,env:PORT,sensitive"` - path remap + env mapping + sensitive
 func ParseJubakoDirectives(tag string, delimiter string, info *FieldInfo) {
@@ -156,10 +153,8 @@ func ParseJubakoDirectives(tag string, delimiter string, info *FieldInfo) {
 	for i := 1; i < len(parts); i++ {
 		directive := strings.TrimSpace(parts[i])
 		switch {
-		case directive == "sensitive":
+		case directive == "sensitive", directive == "sensitive=true":
 			info.Sensitive = SensitiveExplicit
-		case directive == "!sensitive":
-			info.Sensitive = SensitiveExplicitNot
 		case strings.HasPrefix(directive, "env:"):
 			info.EnvVar = strings.TrimPrefix(directive, "env:")
 		}
@@ -167,11 +162,8 @@ func ParseJubakoDirectives(tag string, delimiter string, info *FieldInfo) {
 
 	// Check if first part is just a directive (no path)
 	switch {
-	case pathPart == "sensitive":
+	case pathPart == "sensitive", pathPart == "sensitive=true":
 		info.Sensitive = SensitiveExplicit
-		return
-	case pathPart == "!sensitive":
-		info.Sensitive = SensitiveExplicitNot
 		return
 	case strings.HasPrefix(pathPart, "env:"):
 		// First part is env directive (no path)
@@ -203,7 +195,7 @@ func ParseJubakoDirectives(tag string, delimiter string, info *FieldInfo) {
 // Used for testing and cases where only the jubako tag needs to be parsed.
 func ParseJubakoTag(tag string, delimiter string) FieldInfo {
 	info := FieldInfo{
-		Sensitive: SensitiveInherit,
+		Sensitive: SensitiveNone,
 	}
 	if tag == "-" {
 		info.Skipped = true

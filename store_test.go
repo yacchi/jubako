@@ -1868,26 +1868,24 @@ func TestParseJubakoTag(t *testing.T) {
 		wantSensitive tag.SensitiveState
 		wantEnvVar    string
 	}{
-		{"", "", false, tag.SensitiveInherit, ""},
-		{"/a/b", "/a/b", false, tag.SensitiveInherit, ""},
-		{"a/b", "/a/b", true, tag.SensitiveInherit, ""},
-		{"./a/b", "/a/b", true, tag.SensitiveInherit, ""},
-		{"a/b,option", "/a/b", true, tag.SensitiveInherit, ""},
+		{"", "", false, tag.SensitiveNone, ""},
+		{"/a/b", "/a/b", false, tag.SensitiveNone, ""},
+		{"a/b", "/a/b", true, tag.SensitiveNone, ""},
+		{"./a/b", "/a/b", true, tag.SensitiveNone, ""},
+		{"a/b,option", "/a/b", true, tag.SensitiveNone, ""},
 		// Sensitive directive tests
 		{"sensitive", "", false, tag.SensitiveExplicit, ""},
-		{"!sensitive", "", false, tag.SensitiveExplicitNot, ""},
+		{"sensitive=true", "", false, tag.SensitiveExplicit, ""},
 		{"/a/b,sensitive", "/a/b", false, tag.SensitiveExplicit, ""},
 		{"a/b,sensitive", "/a/b", true, tag.SensitiveExplicit, ""},
-		{"/a/b,!sensitive", "/a/b", false, tag.SensitiveExplicitNot, ""},
+		{"/a/b,sensitive=true", "/a/b", false, tag.SensitiveExplicit, ""},
 		{"./path,sensitive", "/path", true, tag.SensitiveExplicit, ""},
 		// Comma-prefixed directive (no path, explicit delimiter style)
 		{",sensitive", "", false, tag.SensitiveExplicit, ""},
-		{",!sensitive", "", false, tag.SensitiveExplicitNot, ""},
-		// Multiple directives (last one wins)
-		{",sensitive,!sensitive", "", false, tag.SensitiveExplicitNot, ""},
+		{",sensitive=true", "", false, tag.SensitiveExplicit, ""},
 		// Env directive tests
-		{"env:SERVER_PORT", "", false, tag.SensitiveInherit, "SERVER_PORT"},
-		{"/port,env:SERVER_PORT", "/port", false, tag.SensitiveInherit, "SERVER_PORT"},
+		{"env:SERVER_PORT", "", false, tag.SensitiveNone, "SERVER_PORT"},
+		{"/port,env:SERVER_PORT", "/port", false, tag.SensitiveNone, "SERVER_PORT"},
 		{"env:API_KEY,sensitive", "", false, tag.SensitiveExplicit, "API_KEY"},
 		{"/path,env:VAR,sensitive", "/path", false, tag.SensitiveExplicit, "VAR"},
 	}
@@ -1910,13 +1908,13 @@ func TestParseJubakoTag_CustomDelimiter(t *testing.T) {
 		wantSensitive tag.SensitiveState
 	}{
 		// With semicolon delimiter, commas are part of the path
-		{"/path,with,commas", ";", "/path,with,commas", false, tag.SensitiveInherit},
+		{"/path,with,commas", ";", "/path,with,commas", false, tag.SensitiveNone},
 		{"/path,with,commas;sensitive", ";", "/path,with,commas", false, tag.SensitiveExplicit},
 		{"path,with,commas;sensitive", ";", "/path,with,commas", true, tag.SensitiveExplicit},
-		{"./path,with,commas;!sensitive", ";", "/path,with,commas", true, tag.SensitiveExplicitNot},
+		{"./path,with,commas;sensitive=true", ";", "/path,with,commas", true, tag.SensitiveExplicit},
 		// Directive-only with custom delimiter
 		{"sensitive", ";", "", false, tag.SensitiveExplicit},
-		{"!sensitive", ";", "", false, tag.SensitiveExplicitNot},
+		{"sensitive=true", ";", "", false, tag.SensitiveExplicit},
 		// With pipe delimiter
 		{"/a|b|c|sensitive", "|", "/a", false, tag.SensitiveExplicit},
 	}

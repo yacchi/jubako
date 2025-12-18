@@ -298,16 +298,17 @@ store.SetTo("user", "/server/port", 8000)
 
 **C) Sensitive Field Protection** (using `jubako:"sensitive"` tag and `WithSensitive()`)
 
-Sensitive fields are protected from cross-contamination between layers:
+Sensitive fields are protected from accidental exposure. Each sensitive field must be **explicitly marked** on leaf fields only:
 
 ```go
 type Config struct {
     Server      ServerConfig `json:"server"`
-    Credentials Credentials  `json:"credentials" jubako:"sensitive"` // ← sensitive struct
+    Credentials Credentials  `json:"credentials"`
 }
 type Credentials struct {
-    APIKey    string `json:"api_key"`                       // sensitive (inherited)
-    PublicKey string `json:"public_key" jubako:"!sensitive"` // opt-out
+    APIKey    string `json:"api_key" jubako:"sensitive"`  // ← explicit sensitive
+    Password  string `json:"password" jubako:"sensitive"` // ← explicit sensitive
+    PublicKey string `json:"public_key"`                  // normal field (no tag)
 }
 ```
 
@@ -318,7 +319,7 @@ type Credentials struct {
 │  Field Type    │  Normal Layer          │  Sensitive Layer              │
 │                │  (default)             │  (WithSensitive())            │
 ├────────────────┼────────────────────────┼───────────────────────────────┤
-│  Normal field  │  ✓ Allowed             │  ✗ ErrNormalFieldToSensitive  │
+│  Normal field  │  ✓ Allowed             │  ✓ Allowed                    │
 │  Sensitive     │  ✗ ErrSensitiveToNormal│  ✓ Allowed                    │
 └────────────────┴────────────────────────┴───────────────────────────────┘
 ```
@@ -329,10 +330,10 @@ store.Add(layer.New("config", ...), jubako.WithPriority(0))           // normal 
 store.Add(layer.New("secrets", ...), jubako.WithSensitive())          // sensitive layer
 
 // Write operations
-store.SetTo("config", "/server/port", 9000)       // ✓ normal → normal
+store.SetTo("config", "/server/port", 9000)           // ✓ normal → normal
 store.SetTo("secrets", "/credentials/api_key", "key") // ✓ sensitive → sensitive
 store.SetTo("config", "/credentials/api_key", "key")  // ✗ ERROR: sensitive → normal
-store.SetTo("secrets", "/server/port", 9000)          // ✗ ERROR: normal → sensitive
+store.SetTo("secrets", "/server/port", 9000)          // ✓ normal → sensitive (allowed)
 ```
 
 See [examples/sensitive-masking](examples/sensitive-masking/) for a complete example.
@@ -354,8 +355,8 @@ Each option affects a specific stage:
 **Notes:**
 - `WithTagName` affects path resolution for `GetAt`, `Walk`, `SetTo`, and sensitivity checking.
   The decoder (default: JSON) uses its own tag independently.
-- `WithSensitive` enables write protection: sensitive fields can only be written to sensitive layers,
-  and normal fields can only be written to normal layers.
+- `WithSensitive` enables write protection: sensitive fields (marked with `jubako:"sensitive"`)
+  can only be written to sensitive layers. Normal fields can be written to any layer.
 
 ### Layers
 

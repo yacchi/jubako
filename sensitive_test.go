@@ -10,10 +10,12 @@ import (
 )
 
 // Test configuration types for sensitive layer tests
+// Note: sensitive tags should ONLY be applied to leaf fields (string, int, etc.)
+// Applying sensitive to container types (struct, map, slice) will trigger a warning.
 type sensitiveTestConfig struct {
-	App         appSettings     `json:"app"`
-	Credentials credentialData  `json:"credentials" jubako:"sensitive"`
-	Database    databaseConfig  `json:"database"`
+	App         appSettings    `json:"app"`
+	Credentials credentialData `json:"credentials"`
+	Database    databaseConfig `json:"database"`
 }
 
 type appSettings struct {
@@ -22,15 +24,15 @@ type appSettings struct {
 }
 
 type credentialData struct {
-	APIKey    string `json:"api_key"`
-	Password  string `json:"password"`
-	PublicKey string `json:"public_key" jubako:"!sensitive"` // Opt-out from inherited sensitivity
+	APIKey    string `json:"api_key" jubako:"sensitive"`  // Explicitly sensitive
+	Password  string `json:"password" jubako:"sensitive"` // Explicitly sensitive
+	PublicKey string `json:"public_key"`                  // Not sensitive
 }
 
 type databaseConfig struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
-	Password string `json:"password" jubako:"sensitive"` // Individual sensitive field
+	Password string `json:"password" jubako:"sensitive"` // Explicitly sensitive
 }
 
 func TestSensitiveLayerValidation(t *testing.T) {
@@ -144,10 +146,10 @@ func TestSensitiveLayerValidation(t *testing.T) {
 	})
 }
 
-func TestSensitiveFieldInheritance(t *testing.T) {
+func TestSensitiveFieldExplicitOnly(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("nested fields inherit sensitivity", func(t *testing.T) {
+	t.Run("explicit sensitive field to normal layer fails", func(t *testing.T) {
 		store := New[sensitiveTestConfig]()
 
 		// Add a normal layer
@@ -159,17 +161,17 @@ func TestSensitiveFieldInheritance(t *testing.T) {
 			t.Fatalf("Load error: %v", err)
 		}
 
-		// /credentials is sensitive, so /credentials/password should also be sensitive
+		// /credentials/password has explicit sensitive tag - should fail
 		err := store.SetTo("normal", "/credentials/password", "secret")
 		if err == nil {
-			t.Fatal("expected error when writing inherited sensitive field to normal layer")
+			t.Fatal("expected error when writing explicit sensitive field to normal layer")
 		}
 		if !errors.Is(err, ErrSensitiveFieldToNormalLayer) {
 			t.Fatalf("expected ErrSensitiveFieldToNormalLayer, got: %v", err)
 		}
 	})
 
-	t.Run("!sensitive opts out of inherited sensitivity", func(t *testing.T) {
+	t.Run("non-sensitive field in same struct can be written to normal layer", func(t *testing.T) {
 		store := New[sensitiveTestConfig]()
 
 		// Add a normal layer
@@ -183,10 +185,10 @@ func TestSensitiveFieldInheritance(t *testing.T) {
 			t.Fatalf("Load error: %v", err)
 		}
 
-		// /credentials/public_key has !sensitive, so it should be writable to normal layer
+		// /credentials/public_key has NO sensitive tag, so it should be writable to normal layer
 		err := store.SetTo("normal", "/credentials/public_key", "public-key-value")
 		if err != nil {
-			t.Fatalf("unexpected error writing !sensitive field to normal layer: %v", err)
+			t.Fatalf("unexpected error writing non-sensitive field to normal layer: %v", err)
 		}
 
 		config := store.Get()
@@ -195,7 +197,7 @@ func TestSensitiveFieldInheritance(t *testing.T) {
 		}
 	})
 
-	t.Run("individual sensitive field in non-sensitive struct", func(t *testing.T) {
+	t.Run("explicit sensitive field in any struct requires sensitive layer", func(t *testing.T) {
 		store := New[sensitiveTestConfig]()
 
 		// Add a normal layer
@@ -215,7 +217,7 @@ func TestSensitiveFieldInheritance(t *testing.T) {
 			t.Fatalf("unexpected error writing non-sensitive field: %v", err)
 		}
 
-		// /database/password is sensitive - should fail
+		// /database/password has explicit sensitive tag - should fail
 		err = store.SetTo("normal", "/database/password", "secret")
 		if err == nil {
 			t.Fatal("expected error when writing sensitive field to normal layer")
@@ -271,6 +273,8 @@ func TestLayerInfoSensitive(t *testing.T) {
 
 func TestMappingTableIsSensitive(t *testing.T) {
 	// Test the MappingTable.IsSensitive method directly
+	// Note: With explicit-only sensitive marking, only leaf fields with
+	// explicit `jubako:"sensitive"` tag are considered sensitive.
 	table := buildMappingTable(reflect.TypeOf(sensitiveTestConfig{}), DefaultTagDelimiter, DefaultFieldTagName)
 
 	tests := []struct {
@@ -279,13 +283,13 @@ func TestMappingTableIsSensitive(t *testing.T) {
 	}{
 		{"/app", false},
 		{"/app/name", false},
-		{"/credentials", true},
-		{"/credentials/api_key", true},
-		{"/credentials/password", true},
-		{"/credentials/public_key", false}, // opted out with !sensitive
+		{"/credentials", false},             // Container - not sensitive (no inheritance)
+		{"/credentials/api_key", true},      // Explicit sensitive tag
+		{"/credentials/password", true},     // Explicit sensitive tag
+		{"/credentials/public_key", false},  // No sensitive tag
 		{"/database", false},
 		{"/database/host", false},
-		{"/database/password", true}, // individually marked sensitive
+		{"/database/password", true},        // Explicit sensitive tag
 	}
 
 	for _, tt := range tests {
