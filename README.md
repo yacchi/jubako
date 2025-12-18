@@ -1267,6 +1267,40 @@ type PortConfig struct {
 }
 ```
 
+#### Template Transformation
+
+The `env` tag placeholders `\{key\}` and `\{index\}` can now include `text/template` style filter functions using the pipe `|` syntax. This allows for dynamic string manipulation of the captured value during path generation.
+
+**Syntax:**
+
+```go
+`jubako:"env:MY_VAR_{key|filter1|filter2}"`
+```
+
+**Available default functions:**
+
+- `lower`: Converts string to lowercase (`strings.ToLower`)
+- `upper`: Converts string to uppercase (`strings.ToUpper`)
+- `escape`: Escapes special JSON Pointer characters (`jsonptr.Escape`) - **applied automatically as the final step if no `escape` filter is explicitly specified.**
+
+**Example:**
+
+Consider environment variables `APP_BACKLOG_CLIENT_ID_JP=...` and `APP_BACKLOG_CLIENT_ID_US=...`.
+To map these to lowercase keys (`jp`, `us`) in a Go map:
+
+```go
+type Config struct {
+	// Example: APP_BACKLOG_CLIENT_ID_JP -> /backlog/jp/client_id
+	Backlog map[string]struct {
+		ClientID string `json:"client_id" jubako:"env:BACKLOG_CLIENT_ID_{key|lower}"`
+	} `json:"backlog"`
+}
+```
+
+In this example, the value captured by `{key}` (e.g., "JP") will be passed through the `lower` filter, resulting in "jp" for the JSON Pointer path segment. The `escape` filter is automatically applied after `lower` to ensure JSON Pointer compliance.
+
+See [examples/env-template-transform](examples/env-template-transform/) for a complete working example.
+
 ## Custom Format and Source Implementation
 
 Jubako has an extensible architecture. You can implement custom formats and sources.

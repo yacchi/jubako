@@ -202,7 +202,7 @@ func TestCompileEnvPattern(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		regex, err := compileEnvPattern(tt.pattern)
+		regex, _, err := compileEnvPattern(tt.pattern, "")
 		if err != nil {
 			t.Errorf("compileEnvPattern(%q) error = %v", tt.pattern, err)
 			continue

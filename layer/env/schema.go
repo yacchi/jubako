@@ -2,10 +2,12 @@
 package env
 
 import (
+	"bytes"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/yacchi/jubako/internal/tag"
@@ -26,8 +28,8 @@ type EnvMapping struct {
 type PatternMapping struct {
 	// EnvPattern is the compiled regex for matching environment variables.
 	EnvPattern *regexp.Regexp
-	// JSONPathPattern is the target JSON Pointer path with placeholders (e.g., "/users/{key}/name").
-	JSONPathPattern string
+	// PathTemplate is the template for generating JSON Pointer paths.
+	PathTemplate *template.Template
 	// FieldType is the target field type.
 	FieldType reflect.Type
 }
@@ -108,12 +110,12 @@ func buildSchemaMappingFromType(t reflect.Type, basePath string) *SchemaMapping 
 
 			if hasPlaceholders(tagInfo.EnvVar) {
 				// Dynamic mapping
-				regex, err := compileEnvPattern(tagInfo.EnvVar)
+				regex, tmpl, err := compileEnvPattern(tagInfo.EnvVar, jsonPath)
 				if err == nil {
 					currentPattern = &PatternMapping{
-						EnvPattern:      regex,
-						JSONPathPattern: jsonPath,
-						FieldType:       unwrapPointer(field.Type),
+						EnvPattern:   regex,
+						PathTemplate: tmpl,
+						FieldType:    unwrapPointer(field.Type),
 					}
 				}
 			} else {
@@ -175,29 +177,102 @@ func isStructOrPtrStruct(t reflect.Type) bool {
 	return t.Kind() == reflect.Struct
 }
 
-// hasPlaceholders checks if the string contains {key} or {index}.
+// placeholderRegex matches {key...} or {index...}
+var placeholderRegex = regexp.MustCompile(`\{(key|index)(?:\|([^}]+))?\}`)
+
+// hasPlaceholders checks if the string contains {key...} or {index...}.
 func hasPlaceholders(s string) bool {
-	return strings.Contains(s, "{key}") || strings.Contains(s, "{index}")
+	return placeholderRegex.MatchString(s)
 }
 
-// compileEnvPattern converts an env var pattern to a regexp.
-// e.g. "USERS_{key}_NAME" -> "^USERS_(?P<key>.+)_NAME$"
-// e.g. "PORTS_{index}" -> "^PORTS_(?P<index>\d+)$"
-func compileEnvPattern(pattern string) (*regexp.Regexp, error) {
-	// Escape the pattern first to handle special regex characters
-	regexStr := regexp.QuoteMeta(pattern)
+// defaultFuncMap includes basic string manipulation functions.
+var defaultFuncMap = template.FuncMap{
+	"lower":  strings.ToLower,
+	"upper":  strings.ToUpper,
+	"escape": jsonptr.Escape,
+}
 
-	// Replace {key} with named group
-	// We unquote the braces for replacement
-	regexStr = strings.ReplaceAll(regexStr, "\\{key\\}", "(?P<key>.+)")
+// compileEnvPattern converts an env var pattern to a regexp and a path template.
+// e.g. envPattern: "USERS_{key}_NAME", jsonPathPattern: "/users/{key}/name"
+// -> regex: "^USERS_(?P<key>.+)_NAME$"
+// -> template: "/users/{{.key | escape}}/name"
+//
+// e.g. envPattern: "BACKLOG_{key|lower}", jsonPathPattern: "/backlog/{key}"
+// -> regex: "^BACKLOG_(?P<key>.+)$"
+// -> template: "/backlog/{{.key | lower | escape}}"
+func compileEnvPattern(envPattern, jsonPathPattern string) (*regexp.Regexp, *template.Template, error) {
+	// Find all placeholders
+	allMatches := placeholderRegex.FindAllStringSubmatchIndex(envPattern, -1)
 
-	// Replace {index} with named group matching digits
-	regexStr = strings.ReplaceAll(regexStr, "\\{index\\}", "(?P<index>\\d+)")
+	regexParts := []string{"^"}
+	tmplReplacements := make(map[string]string)
 
-	// Anchor to full string
-	regexStr = "^" + regexStr + "$"
+	cursor := 0
+	for _, m := range allMatches {
+		start, end := m[0], m[1]
 
-	return regexp.Compile(regexStr)
+		// Append literal part (escaped for regex)
+		literal := envPattern[cursor:start]
+		regexParts = append(regexParts, regexp.QuoteMeta(literal))
+
+		// Extract name (key or index)
+		name := envPattern[m[2]:m[3]]
+
+		// Extract filter if present
+		var filter string
+		if m[4] != -1 {
+			filter = envPattern[m[4]:m[5]]
+		}
+
+		// Append regex group
+		if name == "index" {
+			regexParts = append(regexParts, "(?P<index>\\d+)")
+		} else {
+			regexParts = append(regexParts, "(?P<"+name+">.+)")
+		}
+
+		// Prepare template replacement
+		// Always append | escape for safety and JSON Pointer compliance
+		replacement := "{{." + name
+		if filter != "" {
+			replacement += " | " + filter
+		}
+		replacement += " | escape}}"
+		tmplReplacements[name] = replacement
+
+		cursor = end
+	}
+	// Append remaining literal part
+	regexParts = append(regexParts, regexp.QuoteMeta(envPattern[cursor:]), "$")
+
+	// Compile Regex
+	fullRegexStr := strings.Join(regexParts, "")
+	regex, err := regexp.Compile(fullRegexStr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Build Template
+	// Replace {key} and {index} in jsonPathPattern with the calculated replacements
+	tmplStr := jsonPathPattern
+	for name, replacement := range tmplReplacements {
+		tmplStr = strings.ReplaceAll(tmplStr, "{"+name+"}", replacement)
+	}
+
+	// Handle standard placeholders if they weren't in envPattern (default behavior)
+	if _, ok := tmplReplacements["key"]; !ok {
+		tmplStr = strings.ReplaceAll(tmplStr, "{key}", "{{.key | escape}}")
+	}
+	if _, ok := tmplReplacements["index"]; !ok {
+		tmplStr = strings.ReplaceAll(tmplStr, "{index}", "{{.index | escape}}")
+	}
+
+	tmpl, err := template.New("path").Funcs(defaultFuncMap).Parse(tmplStr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return regex, tmpl, nil
 }
 
 // unwrapPointer returns the underlying type if t is a pointer, otherwise returns t.
@@ -240,18 +315,21 @@ func (s *SchemaMapping) CreateTransformFunc() TransformFunc {
 		for _, pattern := range s.Patterns {
 			if pattern.EnvPattern.MatchString(key) {
 				matches := pattern.EnvPattern.FindStringSubmatch(key)
-				jsonPath := pattern.JSONPathPattern
 
-				// Replace placeholders in JSON path with captured values
+				// Construct map for template execution
+				data := make(map[string]string)
 				for i, name := range pattern.EnvPattern.SubexpNames() {
 					if i != 0 && name != "" {
-						// matches[i] contains the captured value for the group 'name'
-						// We need to replace {name} in the jsonPath with matches[i]
-						// Note: jsonptr requires escaping if the key contains special chars like "/" or "~"
-						escapedValue := jsonptr.Escape(matches[i])
-						jsonPath = strings.ReplaceAll(jsonPath, "{"+name+"}", escapedValue)
+						data[name] = matches[i]
 					}
 				}
+
+				// Execute template
+				var buf bytes.Buffer
+				if err := pattern.PathTemplate.Execute(&buf, data); err != nil {
+					continue
+				}
+				jsonPath := buf.String()
 
 				converted, err := convertStringToType(value, pattern.FieldType)
 				if err != nil {

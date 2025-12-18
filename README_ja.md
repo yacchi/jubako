@@ -1228,6 +1228,39 @@ type PortConfig struct {
 }
 ```
 
+#### テンプレート変換
+
+`env` タグのプレースホルダー `{key}` および `{index}` では、パイプ `|` 記法を使用して `text/template` スタイルのフィルタ関数を利用できるようになりました。これにより、パス生成時にキャプチャされた値を動的に操作できます。
+
+**構文:**
+
+```go
+`jubako:"env:MY_VAR_{key|filter1|filter2}"`
+```
+
+**利用可能なデフォルト関数:**
+
+- `lower`: 文字列を小文字に変換します (`strings.ToLower`)
+- `upper`: 文字列を大文字に変換します (`strings.ToUpper`)
+- `escape`: JSON Pointer の特殊文字をエスケープします (`jsonptr.Escape`) - **明示的に `escape` フィルタが指定されていない場合、最終ステップとして自動的に適用されます。**
+
+**例:**
+
+環境変数 `APP_BACKLOG_CLIENT_ID_JP=...` と `APP_BACKLOG_CLIENT_ID_US=...` を、Go のマップで小文字のキー (`jp`, `us`) にマッピングする場合：
+
+```go
+type Config struct {
+	// 例: APP_BACKLOG_CLIENT_ID_JP -> /backlog/jp/client_id
+	Backlog map[string]struct {
+		ClientID string `json:"client_id" jubako:"env:BACKLOG_CLIENT_ID_{key|lower}"`
+	} `json:"backlog"`
+}
+```
+
+この例では、`{key}` でキャプチャされた値（例: "JP"）が `lower` フィルタに渡され、結果として JSON Pointer パスセグメントは "jp" になります。JSON Pointer への準拠を保証するため、`lower` の後に自動的に `escape` フィルタが適用されます。
+
+完全な動作例については [examples/env-template-transform](examples/env-template-transform/) を参照してください。
+
 ## 独自フォーマット・ソースの作成
 
 Jubako は拡張可能なアーキテクチャを持っています。独自のフォーマットやソースを実装できます。
