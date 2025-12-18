@@ -18,6 +18,69 @@ var ErrSaveNotSupported = errors.New("save not supported for this source")
 // has been modified since the last Load. This prevents overwriting external changes.
 var ErrSourceModified = errors.New("source has been modified since last load")
 
+// ErrNotExist is a sentinel error for source not found conditions.
+// Use errors.Is(err, source.ErrNotExist) to check for this error.
+// Sources should use NewNotExistError to create errors that wrap both
+// the original error and this sentinel.
+var ErrNotExist = errors.New("source does not exist")
+
+// NotExistError wraps an underlying error while also matching ErrNotExist.
+// This allows callers to check for both the original error (e.g., os.ErrNotExist)
+// and the generic source.ErrNotExist using errors.Is.
+//
+// Example:
+//
+//	err := source.NewNotExistError("config.yaml", os.ErrNotExist)
+//	errors.Is(err, source.ErrNotExist) // true
+//	errors.Is(err, os.ErrNotExist)     // true
+type NotExistError struct {
+	Path string // Resource path (file path, S3 key, etc.)
+	Err  error  // Underlying error (e.g., os.ErrNotExist)
+}
+
+// NewNotExistError creates a NotExistError that wraps the underlying error.
+// The path should identify the resource that was not found.
+func NewNotExistError(path string, err error) *NotExistError {
+	return &NotExistError{Path: path, Err: err}
+}
+
+// Error returns the error message.
+func (e *NotExistError) Error() string {
+	if e.Err != nil {
+		return "source not found: " + e.Path + ": " + e.Err.Error()
+	}
+	return "source not found: " + e.Path
+}
+
+// Unwrap returns the underlying error for errors.Unwrap/Is/As.
+func (e *NotExistError) Unwrap() error {
+	return e.Err
+}
+
+// Is reports whether this error matches the target.
+// It matches ErrNotExist in addition to the wrapped error.
+func (e *NotExistError) Is(target error) bool {
+	return target == ErrNotExist
+}
+
+// NotExistCapable indicates that a source can properly report ErrNotExist
+// when the underlying resource does not exist.
+//
+// Sources that access external resources (files, S3 objects, SSM parameters, etc.)
+// should implement this interface to declare they handle "not found" cases correctly.
+// Sources like bytes.Source that always have data need not implement this.
+//
+// This is used for:
+//   - Documentation: clearly indicates the source's capabilities
+//   - Testing: jktest can verify that NotExistCapable sources have ErrNotExist tests
+//   - Future enhancements: potential runtime warnings or validation
+type NotExistCapable interface {
+	// CanNotExist returns true if this source can return ErrNotExist.
+	// When true, the source is expected to return an error wrapping ErrNotExist
+	// (via NewNotExistError) when the underlying resource does not exist.
+	CanNotExist() bool
+}
+
 // SourceType is an alias for types.SourceType.
 // This allows source implementations to use source.SourceType directly.
 type SourceType = types.SourceType

@@ -83,6 +83,9 @@ var _ source.Source = (*Source)(nil)
 // Ensure Source implements the source.WatchableSource interface.
 var _ source.WatchableSource = (*Source)(nil)
 
+// Ensure Source implements the source.NotExistCapable interface.
+var _ source.NotExistCapable = (*Source)(nil)
+
 // Option configures a Source.
 type Option func(*Source)
 
@@ -138,7 +141,7 @@ func New(path string, opts ...Option) *Source {
 // Load implements the source.Source interface.
 // If search paths are configured, files are searched in order:
 // primary path first, then search paths. The first existing file is loaded.
-// If no file exists, an error is returned for the primary path.
+// If no file exists, an error wrapping source.ErrNotExist is returned.
 func (s *Source) Load(ctx context.Context) ([]byte, error) {
 	// Check for cancellation
 	if err := ctx.Err(); err != nil {
@@ -153,6 +156,12 @@ func (s *Source) Load(ctx context.Context) ([]byte, error) {
 	// Read file
 	data, err := osReadFile(resolvedPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Cache the resolved path even for missing files
+			// This ensures Save will create the file at the correct location
+			s.resolvedPath = resolvedPath
+			return nil, source.NewNotExistError(originalPath, err)
+		}
 		return nil, fmt.Errorf("failed to read file %q: %w", originalPath, err)
 	}
 
@@ -329,6 +338,11 @@ func (s *Source) resolvePath() (expanded string, original string, err error) {
 
 // CanSave returns true because file system sources support saving.
 func (s *Source) CanSave() bool {
+	return true
+}
+
+// CanNotExist returns true because file system sources can have missing files.
+func (s *Source) CanNotExist() bool {
 	return true
 }
 

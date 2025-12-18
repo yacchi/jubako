@@ -6,11 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/types"
 	"github.com/yacchi/jubako/watcher"
 )
@@ -90,8 +90,13 @@ func TestLoad_NoFilesFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load() expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "failed to read file") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "failed to read file")
+	// Check that the error is source.ErrNotExist
+	if !errors.Is(err, source.ErrNotExist) {
+		t.Fatalf("error = %q, want source.ErrNotExist", err.Error())
+	}
+	// Also check that the underlying os.ErrNotExist is preserved
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %q, underlying os.ErrNotExist should be preserved", err.Error())
 	}
 }
 

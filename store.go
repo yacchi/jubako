@@ -13,6 +13,7 @@ import (
 	"github.com/yacchi/jubako/document"
 	"github.com/yacchi/jubako/jsonptr"
 	"github.com/yacchi/jubako/layer"
+	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/types"
 )
 
@@ -63,6 +64,10 @@ type LayerInfo interface {
 	// Sensitive layers can only contain sensitive fields, and sensitive fields
 	// can only be written to sensitive layers.
 	Sensitive() bool
+
+	// Optional returns whether the layer is marked as optional.
+	// Optional layers do not cause an error if their source does not exist.
+	Optional() bool
 }
 
 // AddOption is a functional option for configuring layer addition.
@@ -75,6 +80,7 @@ type addOptions struct {
 	readOnly    bool
 	noWatch     bool
 	sensitive   bool
+	optional    bool
 }
 
 // WithPriority sets a specific priority for the layer.
@@ -117,6 +123,27 @@ func WithSensitive() AddOption {
 	}
 }
 
+// WithOptional marks the layer as optional.
+// When enabled, if the layer's source does not exist (returns source.ErrNotExist),
+// the layer is treated as empty instead of causing a load error.
+// This is useful for optional user configuration files that may not exist initially.
+//
+// When Save is called on an optional layer that was initially missing,
+// the file will be created at the configured path.
+//
+// Example:
+//
+//	// User config is optional - application works with defaults if not present
+//	store.Add(
+//	    layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.New()),
+//	    jubako.WithOptional(),
+//	)
+func WithOptional() AddOption {
+	return func(o *addOptions) {
+		o.optional = true
+	}
+}
+
 // layerEntry holds a layer with its priority for internal use.
 // It implements LayerInfo interface to avoid allocating new structs during traversal.
 type layerEntry struct {
@@ -134,6 +161,9 @@ type layerEntry struct {
 
 	// sensitive indicates whether the layer contains sensitive data
 	sensitive bool
+
+	// optional indicates whether the layer source is optional (missing source is not an error)
+	optional bool
 
 	// dirty indicates whether the layer has been modified but not yet saved
 	dirty bool
@@ -200,6 +230,11 @@ func (e *layerEntry) NoWatch() bool {
 // Sensitive returns whether the layer is marked as containing sensitive data.
 func (e *layerEntry) Sensitive() bool {
 	return e.sensitive
+}
+
+// Optional returns whether the layer is marked as optional.
+func (e *layerEntry) Optional() bool {
+	return e.optional
 }
 
 // findLayerLocked finds a layer by name.
@@ -466,6 +501,7 @@ func (s *Store[T]) Add(l layer.Layer, opts ...AddOption) error {
 		readOnly:  options.readOnly,
 		noWatch:   options.noWatch,
 		sensitive: options.sensitive,
+		optional:  options.optional,
 	}
 
 	// Populate layer details (Layer interface includes DetailsFiller)
@@ -564,6 +600,13 @@ func (s *Store[T]) loadLocked(ctx context.Context) (T, []subscriber[T], error) {
 		// Load data through the layer interface
 		data, err := entry.layer.Load(ctx)
 		if err != nil {
+			// For optional layers, treat source.ErrNotExist as empty data
+			if entry.optional && errors.Is(err, source.ErrNotExist) {
+				entry.data = make(map[string]any)
+				entry.changeset = nil
+				entry.dirty = false
+				continue
+			}
 			var zero T
 			return zero, nil, fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
 		}
@@ -619,6 +662,11 @@ func (s *Store[T]) reloadLocked(ctx context.Context) (T, []subscriber[T], error)
 	for _, entry := range s.layers {
 		data, err := entry.layer.Load(ctx)
 		if err != nil {
+			// For optional layers, treat source.ErrNotExist as empty data
+			if entry.optional && errors.Is(err, source.ErrNotExist) {
+				entry.data = make(map[string]any)
+				continue
+			}
 			var zero T
 			return zero, nil, fmt.Errorf("failed to load layer %q: %w", entry.layer.Name(), err)
 		}

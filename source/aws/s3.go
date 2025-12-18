@@ -38,6 +38,9 @@ var _ source.Source = (*S3Source)(nil)
 // Ensure S3Source implements the source.WatchableSource interface.
 var _ source.WatchableSource = (*S3Source)(nil)
 
+// Ensure S3Source implements the source.NotExistCapable interface.
+var _ source.NotExistCapable = (*S3Source)(nil)
+
 // TypeS3 is the source type identifier for S3 sources.
 const TypeS3 source.SourceType = "s3"
 
@@ -128,8 +131,15 @@ func (s *S3Source) fetchObject(ctx context.Context, ifNoneMatch *string) ([]byte
 	if err != nil {
 		// Check for 304 Not Modified
 		var respErr *awshttp.ResponseError
-		if errors.As(err, &respErr) && respErr.HTTPStatusCode() == http.StatusNotModified {
-			return nil, ifNoneMatch, nil
+		if errors.As(err, &respErr) {
+			switch respErr.HTTPStatusCode() {
+			case http.StatusNotModified:
+				return nil, ifNoneMatch, nil
+			case http.StatusNotFound:
+				// Object does not exist
+				return nil, nil, source.NewNotExistError(
+					fmt.Sprintf("s3://%s/%s", s.bucket, s.key), err)
+			}
 		}
 		return nil, nil, fmt.Errorf("failed to get object s3://%s/%s: %w", s.bucket, s.key, err)
 	}
@@ -152,6 +162,11 @@ func (s *S3Source) Save(ctx context.Context, updateFunc source.UpdateFunc) error
 // CanSave returns false because S3 sources do not support saving.
 func (s *S3Source) CanSave() bool {
 	return false
+}
+
+// CanNotExist returns true because S3 objects can be missing.
+func (s *S3Source) CanNotExist() bool {
+	return true
 }
 
 // Type returns the source type identifier.

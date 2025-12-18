@@ -2,11 +2,13 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/watcher"
 )
@@ -33,6 +35,9 @@ var _ source.Source = (*ParameterStoreSource)(nil)
 
 // Ensure ParameterStoreSource implements the source.WatchableSource interface.
 var _ source.WatchableSource = (*ParameterStoreSource)(nil)
+
+// Ensure ParameterStoreSource implements the source.NotExistCapable interface.
+var _ source.NotExistCapable = (*ParameterStoreSource)(nil)
 
 // TypeParameterStore is the source type identifier for SSM Parameter Store sources.
 const TypeParameterStore source.SourceType = "parameter-store"
@@ -115,11 +120,16 @@ func (s *ParameterStoreSource) getParameter(ctx context.Context) (version int64,
 		WithDecryption: aws.Bool(s.withDecrypt),
 	})
 	if err != nil {
+		// Check for ParameterNotFound error
+		var notFoundErr *types.ParameterNotFound
+		if errors.As(err, &notFoundErr) {
+			return 0, nil, source.NewNotExistError(s.name, err)
+		}
 		return 0, nil, fmt.Errorf("failed to get parameter %q: %w", s.name, err)
 	}
 
 	if result.Parameter == nil {
-		return 0, nil, fmt.Errorf("parameter %q not found", s.name)
+		return 0, nil, source.NewNotExistError(s.name, nil)
 	}
 	if result.Parameter.Value == nil {
 		return 0, nil, fmt.Errorf("parameter %q has no value", s.name)
@@ -144,6 +154,11 @@ func (s *ParameterStoreSource) Save(ctx context.Context, updateFunc source.Updat
 // CanSave returns false because Parameter Store sources do not support saving.
 func (s *ParameterStoreSource) CanSave() bool {
 	return false
+}
+
+// CanNotExist returns true because SSM parameters can be missing.
+func (s *ParameterStoreSource) CanNotExist() bool {
+	return true
 }
 
 // Type returns the source type identifier.

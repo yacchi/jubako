@@ -2267,3 +2267,108 @@ func TestStore_GetAllAt_SkipsEmptyResolvedValues(t *testing.T) {
 		t.Fatalf("GetAllAt(/a) = %#v, want empty slice", got)
 	}
 }
+
+// notExistLayer is a test layer that returns source.ErrNotExist on Load.
+type notExistLayer struct {
+	name layer.Name
+}
+
+func (l *notExistLayer) Name() layer.Name              { return l.name }
+func (l *notExistLayer) Load(_ context.Context) (map[string]any, error) {
+	return nil, source.NewNotExistError("test-path", errors.New("file not found"))
+}
+func (l *notExistLayer) Save(_ context.Context, _ document.JSONPatchSet) error {
+	return nil
+}
+func (l *notExistLayer) CanSave() bool { return true }
+func (l *notExistLayer) Watch(_ ...layer.WatchOption) (layer.LayerWatcher, error) {
+	return nil, nil
+}
+func (l *notExistLayer) FillDetails(d *types.Details) {
+	d.Format = "json"
+}
+
+func TestStore_WithOptional_MissingSource(t *testing.T) {
+	t.Run("optional layer with missing source loads as empty", func(t *testing.T) {
+		store := New[testConfig]()
+
+		// Add an optional layer that returns ErrNotExist
+		err := store.Add(&notExistLayer{name: "missing"}, WithOptional())
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		// Load should succeed
+		err = store.Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+
+		// Config should be zero value (no data from missing layer)
+		cfg := store.Get()
+		if cfg.Host != "" || cfg.Port != 0 {
+			t.Errorf("Get() = %+v, want zero value", cfg)
+		}
+	})
+
+	t.Run("non-optional layer with missing source returns error", func(t *testing.T) {
+		store := New[testConfig]()
+
+		// Add a non-optional layer that returns ErrNotExist
+		err := store.Add(&notExistLayer{name: "missing"})
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		// Load should fail
+		err = store.Load(context.Background())
+		if err == nil {
+			t.Fatal("Load() expected error, got nil")
+		}
+		if !errors.Is(err, source.ErrNotExist) {
+			t.Errorf("Load() error = %v, want source.ErrNotExist", err)
+		}
+	})
+
+	t.Run("optional layer with data loads normally", func(t *testing.T) {
+		store := New[testConfig]()
+
+		// Add a layer with data
+		err := store.Add(mapdata.New("base", map[string]any{
+			"host": "localhost",
+			"port": 8080,
+		}), WithOptional())
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		// Load should succeed
+		err = store.Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+
+		// Config should have the data
+		cfg := store.Get()
+		if cfg.Host != "localhost" || cfg.Port != 8080 {
+			t.Errorf("Get() = %+v, want {Host: localhost, Port: 8080}", cfg)
+		}
+	})
+
+	t.Run("optional layer info returns correct value", func(t *testing.T) {
+		store := New[testConfig]()
+
+		err := store.Add(mapdata.New("optional", nil), WithOptional())
+		if err != nil {
+			t.Fatalf("Add() error = %v", err)
+		}
+
+		info := store.GetLayerInfo("optional")
+		if info == nil {
+			t.Fatal("GetLayerInfo() returned nil")
+		}
+		if !info.Optional() {
+			t.Error("Optional() = false, want true")
+		}
+	})
+}

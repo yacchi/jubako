@@ -111,6 +111,22 @@ type Source interface {
 
 **Note**: Document is stateless; it parses bytes and can apply patch operations to bytes.
 
+**Error Handling**:
+
+Sources should return `source.ErrNotExist` (wrapped with `source.NewNotExistError`) when the resource
+does not exist. This error preserves the underlying error (e.g., `os.ErrNotExist`) while allowing
+the Store to handle optional layers:
+
+```go
+// Source implementation example
+if os.IsNotExist(err) {
+    return nil, source.NewNotExistError(path, err)
+}
+// Both checks work:
+// errors.Is(err, source.ErrNotExist) // true
+// errors.Is(err, os.ErrNotExist)     // true (underlying error preserved)
+```
+
 **Implementations**:
 
 - `source/bytes`: Read-only byte slice source
@@ -250,14 +266,18 @@ store.Add(
     jubako.WithPriority(jubako.PriorityDefaults),
 )
 
+// User config is optional - application works with defaults if not present
 store.Add(
     layer.New("user", fs.New("~/.config/app/config.yaml"), yaml.New()),
     jubako.WithPriority(jubako.PriorityUser),
+    jubako.WithOptional(), // No error if file doesn't exist
 )
 
+// Project config is also optional
 store.Add(
     layer.New("project", fs.New(".app.yaml"), yaml.New()),
     jubako.WithPriority(jubako.PriorityProject),
+    jubako.WithOptional(),
 )
 
 // Environment variables: supports WithDelimiter, WithEnvironFunc, WithTransformFunc options

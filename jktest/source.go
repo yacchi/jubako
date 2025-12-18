@@ -3,6 +3,7 @@ package jktest
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -32,13 +33,27 @@ func testInitParamsWithConfig(cfg watcher.WatchConfig) watcher.WatcherInitialize
 // The factory is called for each test case to ensure test isolation.
 type SourceFactory func(data []byte) source.Source
 
+// NotExistFactory creates a Source that points to a non-existent resource.
+// This is used to test ErrNotExist handling for NotExistCapable sources.
+type NotExistFactory func() source.Source
+
 // SourceTesterOption configures SourceTester behavior.
 type SourceTesterOption func(*SourceTester)
 
+// WithNotExistFactory sets a factory that creates a Source for a non-existent resource.
+// This is required for sources that implement NotExistCapable.
+// If not provided and the source implements NotExistCapable, a warning will be logged.
+func WithNotExistFactory(factory NotExistFactory) SourceTesterOption {
+	return func(st *SourceTester) {
+		st.notExistFactory = factory
+	}
+}
+
 // SourceTester provides utilities to verify Source implementations.
 type SourceTester struct {
-	t       *testing.T
-	factory SourceFactory
+	t              *testing.T
+	factory        SourceFactory
+	notExistFactory NotExistFactory
 }
 
 // NewSourceTester creates a SourceTester for the given SourceFactory.
@@ -60,6 +75,7 @@ func (st *SourceTester) TestAll() {
 	st.t.Run("Load", st.testLoad)
 	st.t.Run("CanSave", st.testCanSave)
 	st.t.Run("Watch", st.testWatch)
+	st.t.Run("NotExistCapable", st.testNotExistCapable)
 }
 
 // testType verifies Type() returns a non-empty SourceType.
@@ -182,5 +198,47 @@ func (st *SourceTester) testWatch(t *testing.T) {
 		// Both watchers should have valid types
 		check(t, w1.Type() != "", "First watcher Type() returned empty string")
 		check(t, w2.Type() != "", "Second watcher Type() returned empty string")
+	})
+}
+
+// testNotExistCapable verifies NotExistCapable implementations.
+// If the source implements NotExistCapable and CanNotExist() returns true,
+// this test verifies that ErrNotExist is properly returned for missing resources.
+func (st *SourceTester) testNotExistCapable(t *testing.T) {
+	s := st.factory([]byte(`{"key": "value"}`))
+
+	nc, ok := s.(source.NotExistCapable)
+	if !ok {
+		t.Log("Source does not implement NotExistCapable (this is OK for sources like bytes.Source)")
+		return
+	}
+
+	if !nc.CanNotExist() {
+		t.Log("Source implements NotExistCapable but CanNotExist() returns false")
+		return
+	}
+
+	// Source declares it can return ErrNotExist
+	t.Run("CanNotExistIsTrue", func(t *testing.T) {
+		require(t, nc.CanNotExist(), "CanNotExist() should return true")
+	})
+
+	t.Run("LoadReturnsErrNotExist", func(t *testing.T) {
+		if st.notExistFactory == nil {
+			t.Log("WARNING: Source implements NotExistCapable with CanNotExist()=true, " +
+				"but no NotExistFactory was provided. " +
+				"Use jktest.WithNotExistFactory() to enable ErrNotExist testing.")
+			t.Skip("NotExistFactory not provided")
+			return
+		}
+
+		// Create a source pointing to a non-existent resource
+		notExistSource := st.notExistFactory()
+
+		// Load should return an error wrapping source.ErrNotExist
+		_, err := notExistSource.Load(context.Background())
+		require(t, err != nil, "Load() on non-existent resource should return error")
+		check(t, errors.Is(err, source.ErrNotExist),
+			"Load() error should wrap source.ErrNotExist, got: %v", err)
 	})
 }

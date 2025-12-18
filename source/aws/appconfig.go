@@ -2,11 +2,13 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/appconfigdata"
+	"github.com/aws/aws-sdk-go-v2/service/appconfigdata/types"
 	"github.com/yacchi/jubako/source"
 	"github.com/yacchi/jubako/watcher"
 )
@@ -34,6 +36,9 @@ var _ source.Source = (*AppConfigSource)(nil)
 
 // Ensure AppConfigSource implements the source.WatchableSource interface.
 var _ source.WatchableSource = (*AppConfigSource)(nil)
+
+// Ensure AppConfigSource implements the source.NotExistCapable interface.
+var _ source.NotExistCapable = (*AppConfigSource)(nil)
 
 // TypeAppConfig is the source type identifier for AppConfig sources.
 const TypeAppConfig source.SourceType = "appconfig"
@@ -99,14 +104,21 @@ func (s *AppConfigSource) ensureClient(ctx context.Context) error {
 
 // startSession starts a new configuration session and returns the initial token.
 func (s *AppConfigSource) startSession(ctx context.Context) (string, error) {
+	resourcePath := fmt.Sprintf("%s/%s/%s", s.application, s.environment, s.configurationProfile)
+
 	result, err := s.client.StartConfigurationSession(ctx, &appconfigdata.StartConfigurationSessionInput{
 		ApplicationIdentifier:          aws.String(s.application),
 		EnvironmentIdentifier:          aws.String(s.environment),
 		ConfigurationProfileIdentifier: aws.String(s.configurationProfile),
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to start configuration session for %s/%s/%s: %w",
-			s.application, s.environment, s.configurationProfile, err)
+		// Check for ResourceNotFoundException
+		var notFoundErr *types.ResourceNotFoundException
+		if errors.As(err, &notFoundErr) {
+			return "", source.NewNotExistError(resourcePath, err)
+		}
+		return "", fmt.Errorf("failed to start configuration session for %s: %w",
+			resourcePath, err)
 	}
 
 	if result.InitialConfigurationToken == nil {
@@ -158,6 +170,11 @@ func (s *AppConfigSource) Save(ctx context.Context, updateFunc source.UpdateFunc
 // CanSave returns false because AppConfig sources do not support saving.
 func (s *AppConfigSource) CanSave() bool {
 	return false
+}
+
+// CanNotExist returns true because AppConfig resources can be missing.
+func (s *AppConfigSource) CanNotExist() bool {
+	return true
 }
 
 // Type returns the source type identifier.

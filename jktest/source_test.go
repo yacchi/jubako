@@ -27,5 +27,14 @@ func TestFsSource_Compliance(t *testing.T) {
 		}
 		return fs.New(path)
 	}
-	jktest.NewSourceTester(t, factory).TestAll()
+
+	// NotExistFactory creates a Source pointing to a non-existent file
+	notExistFactory := func() source.Source {
+		dir := t.TempDir()
+		return fs.New(filepath.Join(dir, "nonexistent.json"))
+	}
+
+	jktest.NewSourceTester(t, factory,
+		jktest.WithNotExistFactory(notExistFactory),
+	).TestAll()
 }
