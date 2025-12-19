@@ -12,7 +12,7 @@ VERSION_NUM := $(shell cat version.txt 2>/dev/null || echo "0.0.0")
 VERSION := v$(VERSION_NUM)
 
 # Find all modules with go.mod (excluding .gopath and vendor)
-ALL_MODULES := $(shell find . -name "go.mod" -not -path "./.gopath/*" -not -path "./vendor/*" -exec dirname {} \; | sort)
+ALL_MODULES := $(shell find . -name "go.mod" -not -path "./.gopath/*" -not -path "./vendor/*" -exec dirname {} \; | grep -v tmp | sort)
 
 # Submodules with tests (modules containing *_test.go files)
 SUBMODULES := $(shell for mod in $(ALL_MODULES); do \

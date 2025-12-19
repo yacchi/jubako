@@ -340,3 +340,107 @@ func TestWithSchemaMapping_NestedStruct(t *testing.T) {
 // Note: parseEnvDirective was removed and its functionality is now handled by
 // internal/tag.Parse. The env directive parsing is tested through
 // TestBuildSchemaMapping_* tests and store_test.go's TestParseJubakoTag tests.
+
+func TestBuildSchemaMapping_MapWithRelativePath(t *testing.T) {
+	// This tests the bug where explicit relative paths in Map container values
+	// were being treated as absolute paths instead of relative to the Map entry.
+	//
+	// See: jubako_issue_relative_path.md
+
+	type App struct {
+		// Case 1: Explicit relative path - should be /apps/{key}/name
+		Name string `json:"name" jubako:"name,env:APP_NAME_{key}"`
+		// Case 2: No path specified (implicit relative) - should be /apps/{key}/id
+		ID string `json:"id" jubako:",env:APP_ID_{key}"`
+	}
+
+	type Config struct {
+		Apps map[string]App `json:"apps" jubako:"apps"`
+	}
+
+	schema := BuildSchemaMapping[Config]()
+
+	// Should have 2 patterns for dynamic mappings
+	if len(schema.Patterns) != 2 {
+		t.Fatalf("expected 2 patterns, got %d", len(schema.Patterns))
+	}
+
+	transform := schema.CreateTransformFunc()
+
+	// Test APP_NAME_item1 - should map to /apps/item1/name (relative)
+	// BUG: was mapping to /name (absolute)
+	path, value := transform("APP_NAME_item1", "ExplicitNameValue")
+	if path != "/apps/item1/name" {
+		t.Errorf("APP_NAME_item1 path = %q, want /apps/item1/name (bug: treating relative path as absolute)", path)
+	}
+	if value != "ExplicitNameValue" {
+		t.Errorf("APP_NAME_item1 value = %v, want ExplicitNameValue", value)
+	}
+
+	// Test APP_ID_item1 - should map to /apps/item1/id (implicit relative)
+	path, value = transform("APP_ID_item1", "ImplicitIDValue")
+	if path != "/apps/item1/id" {
+		t.Errorf("APP_ID_item1 path = %q, want /apps/item1/id", path)
+	}
+	if value != "ImplicitIDValue" {
+		t.Errorf("APP_ID_item1 value = %v, want ImplicitIDValue", value)
+	}
+}
+
+func TestBuildSchemaMapping_SliceWithRelativePath(t *testing.T) {
+	// Similar test for Slice containers
+
+	type Item struct {
+		// Explicit relative path - should be /items/{index}/name
+		Name string `json:"name" jubako:"name,env:ITEM_NAME_{index}"`
+		// No path specified - should be /items/{index}/value
+		Value string `json:"value" jubako:",env:ITEM_VALUE_{index}"`
+	}
+
+	type Config struct {
+		Items []Item `json:"items" jubako:"items"`
+	}
+
+	schema := BuildSchemaMapping[Config]()
+	transform := schema.CreateTransformFunc()
+
+	// Test ITEM_NAME_0 - should map to /items/0/name (relative)
+	path, value := transform("ITEM_NAME_0", "FirstItem")
+	if path != "/items/0/name" {
+		t.Errorf("ITEM_NAME_0 path = %q, want /items/0/name", path)
+	}
+	if value != "FirstItem" {
+		t.Errorf("ITEM_NAME_0 value = %v, want FirstItem", value)
+	}
+
+	// Test ITEM_VALUE_0 - should map to /items/0/value (implicit relative)
+	path, value = transform("ITEM_VALUE_0", "ValueOne")
+	if path != "/items/0/value" {
+		t.Errorf("ITEM_VALUE_0 path = %q, want /items/0/value", path)
+	}
+	if value != "ValueOne" {
+		t.Errorf("ITEM_VALUE_0 value = %v, want ValueOne", value)
+	}
+}
+
+func TestBuildSchemaMapping_AbsolutePathInContainer(t *testing.T) {
+	// Test that absolute paths (starting with /) are still treated as absolute
+
+	type App struct {
+		// Absolute path - should remain /global/name even inside Map
+		Name string `json:"name" jubako:"/global/name,env:GLOBAL_NAME_{key}"`
+	}
+
+	type Config struct {
+		Apps map[string]App `json:"apps" jubako:"apps"`
+	}
+
+	schema := BuildSchemaMapping[Config]()
+	transform := schema.CreateTransformFunc()
+
+	// Test GLOBAL_NAME_item1 - should map to /global/name (absolute)
+	path, _ := transform("GLOBAL_NAME_item1", "GlobalValue")
+	if path != "/global/name" {
+		t.Errorf("GLOBAL_NAME_item1 path = %q, want /global/name (absolute path)", path)
+	}
+}

@@ -105,7 +105,13 @@ func buildSchemaMappingFromType(t reflect.Type, basePath string) *SchemaMapping 
 			// Use custom path if specified, otherwise use field path
 			jsonPath := fieldPath
 			if tagInfo.Path != "" {
-				jsonPath = tagInfo.Path
+				if tagInfo.IsRelative {
+					// Relative path: prepend basePath to resolve correctly in current context
+					jsonPath = basePath + tagInfo.Path
+				} else {
+					// Absolute path: use as-is
+					jsonPath = tagInfo.Path
+				}
 			}
 
 			if hasPlaceholders(tagInfo.EnvVar) {
