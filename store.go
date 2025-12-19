@@ -1239,10 +1239,29 @@ func (s *Store[T]) applyMaskLocked(rv ResolvedValue, path string) ResolvedValue 
 		return rv
 	}
 
+	// Don't mask empty values (nil or empty string)
+	// This prevents users from thinking a value is set when it's actually empty
+	if isEmptyValue(rv.Value) {
+		return rv
+	}
+
 	// Apply masking
 	rv.Value = s.sensitiveMask(rv.Value)
 	rv.Masked = true
 	return rv
+}
+
+// isEmptyValue returns true if the value is considered empty for masking purposes.
+// Empty values (nil, empty string) are not masked to avoid misleading users
+// into thinking a value is set when it's actually empty.
+func isEmptyValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	if s, ok := v.(string); ok && s == "" {
+		return true
+	}
+	return false
 }
 
 // getAtLocked returns the resolved value at path. Caller must hold the lock.

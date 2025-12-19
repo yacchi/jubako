@@ -488,6 +488,88 @@ func TestSensitiveMasking(t *testing.T) {
 			t.Error("value should not be masked without mask option")
 		}
 	})
+
+	t.Run("empty values are not masked", func(t *testing.T) {
+		store := New[sensitiveTestConfig](WithSensitiveMaskString("********"))
+
+		if err := store.Add(mapdata.New("test", map[string]any{
+			"credentials": map[string]any{
+				"api_key":  "secret-key-123", // non-empty - should be masked
+				"password": "",               // empty string - should NOT be masked
+			},
+		})); err != nil {
+			t.Fatalf("Add error: %v", err)
+		}
+
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load error: %v", err)
+		}
+
+		// Non-empty value should be masked
+		rv := store.GetAt("/credentials/api_key")
+		if rv.Value != "********" {
+			t.Errorf("expected masked value for non-empty, got %v", rv.Value)
+		}
+		if !rv.Masked {
+			t.Error("non-empty sensitive value should be masked")
+		}
+
+		// Empty string should NOT be masked (to avoid misleading users)
+		rv = store.GetAt("/credentials/password")
+		if rv.Value != "" {
+			t.Errorf("expected empty string for empty value, got %v", rv.Value)
+		}
+		if rv.Masked {
+			t.Error("empty sensitive value should NOT be masked")
+		}
+		if !rv.Exists {
+			t.Error("empty value should still exist")
+		}
+	})
+
+	t.Run("Walk does not mask empty values", func(t *testing.T) {
+		store := New[sensitiveTestConfig](WithSensitiveMaskString("****"))
+
+		if err := store.Add(mapdata.New("test", map[string]any{
+			"credentials": map[string]any{
+				"api_key":  "secret",
+				"password": "", // empty
+			},
+		})); err != nil {
+			t.Fatalf("Add error: %v", err)
+		}
+
+		if err := store.Load(ctx); err != nil {
+			t.Fatalf("Load error: %v", err)
+		}
+
+		results := make(map[string]struct {
+			value  any
+			masked bool
+		})
+		store.Walk(func(ctx WalkContext) bool {
+			rv := ctx.Value()
+			results[ctx.Path] = struct {
+				value  any
+				masked bool
+			}{rv.Value, rv.Masked}
+			return true
+		})
+
+		// api_key should be masked
+		if apiKey, ok := results["/credentials/api_key"]; ok {
+			if !apiKey.masked || apiKey.value != "****" {
+				t.Errorf("api_key should be masked, got masked=%v value=%v", apiKey.masked, apiKey.value)
+			}
+		}
+
+		// password (empty) should NOT be masked
+		if password, ok := results["/credentials/password"]; ok {
+			if password.masked || password.value != "" {
+				t.Errorf("empty password should not be masked, got masked=%v value=%v", password.masked, password.value)
+			}
+		}
+	})
 }
 
 func TestSensitiveMapping(t *testing.T) {

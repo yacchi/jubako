@@ -201,13 +201,15 @@ type WalkContext struct {
 
 // Value returns the resolved value at this path from the highest priority layer.
 // If the path is sensitive and masking is enabled, the returned value will be masked.
+// Empty values (nil or empty string) are not masked to avoid misleading users.
 // Use ValueUnmasked to get the original value.
 func (c WalkContext) Value() ResolvedValue {
 	entry := c.origin.get()
 	rv := newResolvedValue(entry, c.Path)
 
 	// Apply masking if configured and path is sensitive
-	if c.maskFunc != nil && c.sensitive && rv.Exists {
+	// Don't mask empty values (nil or empty string) to avoid misleading users
+	if c.maskFunc != nil && c.sensitive && rv.Exists && !isEmptyValue(rv.Value) {
 		rv.Value = c.maskFunc(rv.Value)
 		rv.Masked = true
 	}
