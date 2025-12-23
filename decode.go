@@ -152,7 +152,8 @@ func buildMappingTableRecursive(t reflect.Type, delimiter string, fieldTagName s
 		switch fieldType.Kind() {
 		case reflect.Struct:
 			// Recursively build mapping table for nested struct
-			if nested := buildMappingTableRecursive(fieldType, delimiter, fieldTagName, nestedTypePath); nested != nil && !nested.IsEmpty() {
+			// Use HasMappings() to include tables needed for type conversion (not just jubako directives)
+			if nested := buildMappingTableRecursive(fieldType, delimiter, fieldTagName, nestedTypePath); nested != nil && nested.HasMappings() {
 				table.Nested[tagInfo.FieldKey] = nested
 			}
 
@@ -164,7 +165,7 @@ func buildMappingTableRecursive(t reflect.Type, delimiter string, fieldTagName s
 			}
 			if elemType.Kind() == reflect.Struct {
 				elemTypePath := nestedTypePath + "[]"
-				if elemTable := buildMappingTableRecursive(elemType, delimiter, fieldTagName, elemTypePath); elemTable != nil && !elemTable.IsEmpty() {
+				if elemTable := buildMappingTableRecursive(elemType, delimiter, fieldTagName, elemTypePath); elemTable != nil && elemTable.HasMappings() {
 					table.SliceElement[tagInfo.FieldKey] = elemTable
 				}
 			}
@@ -177,7 +178,7 @@ func buildMappingTableRecursive(t reflect.Type, delimiter string, fieldTagName s
 			}
 			if valueType.Kind() == reflect.Struct {
 				mapTypePath := nestedTypePath + "[key]"
-				if valueTable := buildMappingTableRecursive(valueType, delimiter, fieldTagName, mapTypePath); valueTable != nil && !valueTable.IsEmpty() {
+				if valueTable := buildMappingTableRecursive(valueType, delimiter, fieldTagName, mapTypePath); valueTable != nil && valueTable.HasMappings() {
 					table.MapValue[tagInfo.FieldKey] = valueTable
 				}
 			}
@@ -241,16 +242,28 @@ func (t *MappingTable) IsEmpty() bool {
 	return true
 }
 
+// HasMappings returns true if there are any field mappings (for type conversion).
+// This is different from IsEmpty which only considers jubako directives.
+func (t *MappingTable) HasMappings() bool {
+	if t == nil {
+		return false
+	}
+	return len(t.Mappings) > 0 || len(t.Nested) > 0 || len(t.SliceElement) > 0 || len(t.MapValue) > 0
+}
+
 // applyMappings applies the mapping table to transform the source map.
 // Returns a new map with values remapped according to jubako tags.
-func applyMappings(src map[string]any, table *MappingTable) map[string]any {
-	return applyMappingsWithRoot(src, src, table)
+// If converter is nil, no type conversion is performed.
+func applyMappings(src map[string]any, table *MappingTable, converter ValueConverter) map[string]any {
+	return applyMappingsWithRoot(src, src, table, "", converter)
 }
 
 // applyMappingsWithRoot applies the mapping table with access to the root source map.
 // root is the original source map (for absolute path lookups in jubako tags).
 // src is the current context map (for regular JSON field mappings and relative path lookups).
-func applyMappingsWithRoot(root, src map[string]any, table *MappingTable) map[string]any {
+// pathPrefix is the current path context (for type conversion error messages).
+// converter is an optional ValueConverter for type conversion (can be nil).
+func applyMappingsWithRoot(root, src map[string]any, table *MappingTable, pathPrefix string, converter ValueConverter) map[string]any {
 	if table == nil {
 		return src
 	}
@@ -282,22 +295,48 @@ func applyMappingsWithRoot(root, src map[string]any, table *MappingTable) map[st
 		}
 	}
 
+	// Apply type conversion for all fields with known types
+	if converter != nil {
+		for _, m := range table.Mappings {
+			if m.FieldType == nil || m.Skipped {
+				continue
+			}
+			value, exists := dst[m.FieldKey]
+			if !exists || value == nil {
+				continue
+			}
+			valueType := reflect.TypeOf(value)
+			if valueType == m.FieldType {
+				continue // Already correct type
+			}
+			fieldPath := pathPrefix + "/" + jsonptr.Escape(m.FieldKey)
+			converted, err := converter(fieldPath, value, m.FieldType)
+			if err == nil && converted != nil {
+				dst[m.FieldKey] = converted
+			}
+			// On error, leave value as-is and let decoder handle it
+		}
+	}
+
 	// Apply nested struct mappings
 	for fieldKey, nestedTable := range table.Nested {
 		// Get sub-map from current src for regular JSON mappings
 		subSrc, _ := src[fieldKey].(map[string]any)
 		// Pass root for absolute path lookups, subSrc for JSON field context
-		dst[fieldKey] = applyMappingsWithRoot(root, subSrc, nestedTable)
+		nestedPath := pathPrefix + "/" + jsonptr.Escape(fieldKey)
+		dst[fieldKey] = applyMappingsWithRoot(root, subSrc, nestedTable, nestedPath, converter)
 	}
 
 	// Apply slice element mappings
 	for fieldKey, elemTable := range table.SliceElement {
 		if slice, ok := dst[fieldKey].([]any); ok {
 			newSlice := make([]any, len(slice))
+			slicePath := pathPrefix + "/" + jsonptr.Escape(fieldKey)
 			for i, elem := range slice {
 				if elemMap, ok := elem.(map[string]any); ok {
 					// For each element, the element itself becomes the context for relative paths
-					newSlice[i] = applyMappingsWithRoot(root, elemMap, elemTable)
+					elemPath := fmt.Sprintf("%s/%d", slicePath, i)
+					newSlice[i] = applyMappingsWithRoot(root, elemMap, elemTable, elemPath, converter)
 				} else {
 					newSlice[i] = elem
 				}
@@ -310,10 +349,12 @@ func applyMappingsWithRoot(root, src map[string]any, table *MappingTable) map[st
 	for fieldKey, valueTable := range table.MapValue {
 		if m, ok := dst[fieldKey].(map[string]any); ok {
 			newMap := make(map[string]any, len(m))
+			mapPath := pathPrefix + "/" + jsonptr.Escape(fieldKey)
 			for k, v := range m {
 				if valueMap, ok := v.(map[string]any); ok {
 					// For each value, the value itself becomes the context for relative paths
-					newMap[k] = applyMappingsWithRoot(root, valueMap, valueTable)
+					valuePath := mapPath + "/" + jsonptr.Escape(k)
+					newMap[k] = applyMappingsWithRoot(root, valueMap, valueTable, valuePath, converter)
 				} else {
 					newMap[k] = v
 				}

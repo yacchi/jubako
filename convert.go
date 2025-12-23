@@ -321,6 +321,7 @@ func convertToString(value any) (string, error) {
 }
 
 // convertToSlice converts []any to []T with element-wise conversion.
+// Only converts slices of primitive types. Slices of structs are left for the decoder.
 func convertToSlice(path string, value any, targetType reflect.Type) (any, error) {
 	srcSlice, ok := value.([]any)
 	if !ok {
@@ -336,6 +337,16 @@ func convertToSlice(path string, value any, targetType reflect.Type) (any, error
 	}
 
 	elemType := targetType.Elem()
+	// Handle pointer to struct
+	elemKind := elemType.Kind()
+	if elemKind == reflect.Ptr {
+		elemKind = elemType.Elem().Kind()
+	}
+	// Skip conversion for struct types - let the decoder handle them
+	if elemKind == reflect.Struct {
+		return value, nil
+	}
+
 	result := reflect.MakeSlice(targetType, len(srcSlice), len(srcSlice))
 
 	for i, elem := range srcSlice {
@@ -353,6 +364,7 @@ func convertToSlice(path string, value any, targetType reflect.Type) (any, error
 }
 
 // convertToMap converts map[string]any to map[K]V with element-wise conversion.
+// Only converts maps with primitive value types. Maps with struct values are left for the decoder.
 func convertToMap(path string, value any, targetType reflect.Type) (any, error) {
 	srcMap, ok := value.(map[string]any)
 	if !ok {
@@ -364,6 +376,16 @@ func convertToMap(path string, value any, targetType reflect.Type) (any, error) 
 
 	// Only handle string keys for now
 	if keyType.Kind() != reflect.String {
+		return value, nil
+	}
+
+	// Handle pointer to struct
+	valueKind := valueType.Kind()
+	if valueKind == reflect.Ptr {
+		valueKind = valueType.Elem().Kind()
+	}
+	// Skip conversion for struct value types - let the decoder handle them
+	if valueKind == reflect.Struct {
 		return value, nil
 	}
 

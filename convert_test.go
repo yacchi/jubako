@@ -974,6 +974,136 @@ func TestStore_WithValueConverter_Custom(t *testing.T) {
 	}
 }
 
+// TestStore_Load_TypeConversion tests that type conversion is applied during Load/materialize.
+func TestStore_Load_TypeConversion(t *testing.T) {
+	type Config struct {
+		Enabled   bool    `json:"enabled"`
+		Port      int     `json:"port"`
+		Threshold float64 `json:"threshold"`
+		Count     uint    `json:"count"`
+	}
+
+	// Create a layer with string values that need conversion
+	// (simulating env layer or config file with string values)
+	src := &mockWritableSource{data: []byte(`{
+		"enabled": "true",
+		"port": "8080",
+		"threshold": "1.5",
+		"count": "10"
+	}`)}
+
+	store := New[Config]()
+	l := newMockWritableLayer("test", src)
+	if err := store.Add(l); err != nil {
+		t.Fatalf("failed to add layer: %v", err)
+	}
+
+	// Load should apply type conversion
+	if err := store.Load(t.Context()); err != nil {
+		t.Fatalf("failed to load: %v", err)
+	}
+
+	cfg := store.Get()
+
+	// Verify all values were converted correctly
+	if cfg.Enabled != true {
+		t.Errorf("expected enabled=true, got %v", cfg.Enabled)
+	}
+	if cfg.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", cfg.Port)
+	}
+	if cfg.Threshold != 1.5 {
+		t.Errorf("expected threshold=1.5, got %f", cfg.Threshold)
+	}
+	if cfg.Count != 10 {
+		t.Errorf("expected count=10, got %d", cfg.Count)
+	}
+}
+
+// TestStore_Load_TypeConversion_Nested tests type conversion for nested structs during Load.
+func TestStore_Load_TypeConversion_Nested(t *testing.T) {
+	type ServerConfig struct {
+		Port    int  `json:"port"`
+		Enabled bool `json:"enabled"`
+	}
+	type Config struct {
+		Server ServerConfig `json:"server"`
+		Debug  bool         `json:"debug"`
+	}
+
+	// Create a layer with nested string values
+	src := &mockWritableSource{data: []byte(`{
+		"server": {
+			"port": "9000",
+			"enabled": "yes"
+		},
+		"debug": "false"
+	}`)}
+
+	store := New[Config]()
+	l := newMockWritableLayer("test", src)
+	if err := store.Add(l); err != nil {
+		t.Fatalf("failed to add layer: %v", err)
+	}
+
+	if err := store.Load(t.Context()); err != nil {
+		t.Fatalf("failed to load: %v", err)
+	}
+
+	cfg := store.Get()
+
+	if cfg.Server.Port != 9000 {
+		t.Errorf("expected server.port=9000, got %d", cfg.Server.Port)
+	}
+	if cfg.Server.Enabled != true {
+		t.Errorf("expected server.enabled=true, got %v", cfg.Server.Enabled)
+	}
+	if cfg.Debug != false {
+		t.Errorf("expected debug=false, got %v", cfg.Debug)
+	}
+}
+
+// TestStore_Load_CustomConverter tests that custom converter is used during Load.
+func TestStore_Load_CustomConverter(t *testing.T) {
+	type Config struct {
+		Value int `json:"value"`
+	}
+
+	callCount := 0
+	customConverter := func(path string, value any, targetType reflect.Type) (any, error) {
+		callCount++
+		if targetType.Kind() == reflect.Int {
+			// Always return 999 for testing
+			return 999, nil
+		}
+		return DefaultValueConverter(path, value, targetType)
+	}
+
+	src := &mockWritableSource{data: []byte(`{"value": "123"}`)}
+
+	store := New[Config](WithValueConverter(customConverter))
+	l := newMockWritableLayer("test", src)
+	if err := store.Add(l); err != nil {
+		t.Fatalf("failed to add layer: %v", err)
+	}
+
+	if err := store.Load(t.Context()); err != nil {
+		t.Fatalf("failed to load: %v", err)
+	}
+
+	cfg := store.Get()
+
+	// Custom converter should have been called
+	if callCount == 0 {
+		t.Error("custom converter was not called during Load")
+	}
+
+	// Value should be 999 from custom converter
+	if cfg.Value != 999 {
+		t.Errorf("expected value=999 from custom converter, got %d", cfg.Value)
+	}
+}
+
 // Helper functions for pointer creation
 func intPtr(v int) *int          { return &v }
 func boolPtr(v bool) *bool       { return &v }

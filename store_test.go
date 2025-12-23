@@ -2205,7 +2205,7 @@ func TestApplyMappingsWithRoot_SliceAndMapFallbacks(t *testing.T) {
 		},
 	}
 
-	out := applyMappingsWithRoot(src, src, table)
+	out := applyMappingsWithRoot(src, src, table, "", nil)
 	list := out["list"].([]any)
 	if list[0] != "not-a-map" {
 		t.Fatalf("list[0] = %#v", list[0])
