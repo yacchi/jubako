@@ -50,6 +50,16 @@ type PathMapping struct {
 	// Sensitive indicates whether this field contains sensitive data.
 	// Used to prevent cross-contamination between sensitive and non-sensitive layers.
 	Sensitive sensitiveState
+	// FieldType is the reflect.Type of the struct field.
+	// Used for type conversion when setting values via SetTo.
+	FieldType reflect.Type
+}
+
+// HasDirective returns true if this mapping has any jubako tag directives.
+// This is used to distinguish between fields that only have type info
+// (for SetTo conversion) vs fields with actual jubako tag mappings.
+func (m *PathMapping) HasDirective() bool {
+	return m.SourcePath != "" || m.Skipped || m.Sensitive == sensitiveExplicit
 }
 
 // MappingTable holds all path mappings for a struct type.
@@ -118,26 +128,17 @@ func buildMappingTableRecursive(t reflect.Type, delimiter string, fieldTagName s
 		// Check for sensitive tag on non-leaf types and emit warning
 		checkSensitiveOnNonLeaf(currentTypePath, field, tagInfo)
 
-		// Create PathMapping if jubako tag has relevant directives
-		if tagInfo.Skipped {
-			m := &PathMapping{
-				FieldKey: tagInfo.FieldKey,
-				Skipped:  true,
-			}
-			table.Mappings = append(table.Mappings, m)
-		} else {
-			m := &PathMapping{
-				FieldKey:   tagInfo.FieldKey,
-				SourcePath: tagInfo.Path,
-				IsRelative: tagInfo.IsRelative,
-				Sensitive:  tagInfo.Sensitive,
-			}
-
-			// If any relevant directive is present, record the mapping
-			if tagInfo.Path != "" || tagInfo.Sensitive == sensitiveExplicit || tagInfo.EnvVar != "" {
-				table.Mappings = append(table.Mappings, m)
-			}
+		// Create PathMapping for all fields to support type conversion in SetTo.
+		// Even fields without jubako tags need type info for proper conversion.
+		m := &PathMapping{
+			FieldKey:   tagInfo.FieldKey,
+			SourcePath: tagInfo.Path,
+			IsRelative: tagInfo.IsRelative,
+			Sensitive:  tagInfo.Sensitive,
+			Skipped:    tagInfo.Skipped,
+			FieldType:  field.Type,
 		}
+		table.Mappings = append(table.Mappings, m)
 
 		// Check for nested types (struct, slice, map) that may have jubako tags
 		fieldType := field.Type
@@ -220,12 +221,24 @@ func (t *MappingTable) writeString(sb *strings.Builder, indent string) {
 	}
 }
 
-// IsEmpty returns true if there are no mappings defined.
+// IsEmpty returns true if there are no jubako tag directives defined.
+// Note: Mappings may contain entries for type conversion purposes,
+// but IsEmpty only considers entries with actual jubako tag directives.
 func (t *MappingTable) IsEmpty() bool {
 	if t == nil {
 		return true
 	}
-	return len(t.Mappings) == 0 && len(t.Nested) == 0 && len(t.SliceElement) == 0 && len(t.MapValue) == 0
+	// Check if any mapping has a directive
+	for _, m := range t.Mappings {
+		if m.HasDirective() {
+			return false
+		}
+	}
+	// Check nested tables
+	if len(t.Nested) > 0 || len(t.SliceElement) > 0 || len(t.MapValue) > 0 {
+		return false
+	}
+	return true
 }
 
 // applyMappings applies the mapping table to transform the source map.

@@ -254,11 +254,12 @@ type StoreOption func(*storeOptions)
 
 // storeOptions holds the options for New.
 type storeOptions struct {
-	priorityStep  int
-	decoder       MapDecoder
-	sensitiveMask SensitiveMaskFunc
-	tagDelimiter  string
-	tagName       string
+	priorityStep   int
+	decoder        MapDecoder
+	sensitiveMask  SensitiveMaskFunc
+	tagDelimiter   string
+	tagName        string
+	valueConverter ValueConverter
 }
 
 // defaultPriorityStep is the default step size for auto-assigned priorities.
@@ -371,6 +372,36 @@ func WithTagName(name string) StoreOption {
 	}
 }
 
+// WithValueConverter sets a custom value converter for type conversion in SetTo.
+// The converter is called only when the value's type doesn't match the expected
+// type from the struct definition.
+//
+// The default converter (DefaultValueConverter) handles common conversions like
+// string to bool, string to int, etc. (similar to mapstructure's WeaklyTypedInput).
+//
+// You can provide a custom converter that handles specific types and falls back
+// to DefaultValueConverter for unhandled cases.
+//
+// Example:
+//
+//	store := jubako.New[Config](jubako.WithValueConverter(
+//	    func(path string, value any, targetType reflect.Type) (any, error) {
+//	        // Custom handling for time.Duration fields
+//	        if targetType == reflect.TypeOf(time.Duration(0)) {
+//	            if s, ok := value.(string); ok {
+//	                return time.ParseDuration(s)
+//	            }
+//	        }
+//	        // Fall back to default converter
+//	        return jubako.DefaultValueConverter(path, value, targetType)
+//	    },
+//	))
+func WithValueConverter(fn ValueConverter) StoreOption {
+	return func(o *storeOptions) {
+		o.valueConverter = fn
+	}
+}
+
 // Store manages multiple configuration layers and provides a materialized view
 // of the merged configuration.
 //
@@ -418,6 +449,10 @@ type Store[T any] struct {
 	// tagName is the struct tag name used for field name resolution
 	tagName string
 
+	// valueConverter is the function used to convert values when types mismatch in SetTo
+	// If nil, DefaultValueConverter is used
+	valueConverter ValueConverter
+
 	// mu protects layers, origins, and subscribers
 	mu sync.RWMutex
 }
@@ -443,6 +478,8 @@ func New[T any](opts ...StoreOption) *Store[T] {
 		decoder:      decoder.JSON,
 		tagDelimiter: DefaultTagDelimiter,
 		tagName:      DefaultFieldTagName,
+		// Set DefaultValueConverter if not provided
+		valueConverter: DefaultValueConverter,
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -457,17 +494,18 @@ func New[T any](opts ...StoreOption) *Store[T] {
 	schema := NewSchema(table)
 
 	return &Store[T]{
-		layers:        make([]*layerEntry, 0),
-		resolved:      NewCell(zero),
-		origins:       newOrigins(),
-		subscribers:   make([]subscriber[T], 0),
-		nextSubID:     1,
-		priorityStep:  options.priorityStep,
-		decoder:       options.decoder,
-		schema:        schema,
-		sensitiveMask: options.sensitiveMask,
-		tagDelimiter:  options.tagDelimiter,
-		tagName:       options.tagName,
+		layers:         make([]*layerEntry, 0),
+		resolved:       NewCell(zero),
+		origins:        newOrigins(),
+		subscribers:    make([]subscriber[T], 0),
+		nextSubID:      1,
+		priorityStep:   options.priorityStep,
+		decoder:        options.decoder,
+		schema:         schema,
+		sensitiveMask:  options.sensitiveMask,
+		tagDelimiter:   options.tagDelimiter,
+		tagName:        options.tagName,
+		valueConverter: options.valueConverter,
 	}
 }
 
@@ -807,6 +845,19 @@ func (s *Store[T]) setToLocked(layerName layer.Name, path string, value any) (T,
 		return zero, nil, fmt.Errorf("%w: path %s, layer %s", err, path, layerName)
 	}
 
+	// Apply type conversion if needed
+	if m := s.schema.Trie.Lookup(path); m != nil && m.FieldType != nil && value != nil {
+		valueType := reflect.TypeOf(value)
+		if valueType != m.FieldType {
+			converted, err := s.valueConverter(path, value, m.FieldType)
+			if err != nil {
+				var zero T
+				return zero, nil, fmt.Errorf("failed to convert value at path %q: %w", path, err)
+			}
+			value = converted
+		}
+	}
+
 	// Set the value in the data map using jsonptr.SetPath
 	// SetResult tells us whether this was a create (add) or update (replace) operation
 	result := jsonptr.SetPath(entry.data, path, value)
@@ -952,8 +1003,22 @@ func (s *Store[T]) setLocked(layerName layer.Name, opts []SetOption) (T, []subsc
 			return zero, nil, fmt.Errorf("%w: path %s, layer %s", err, pv.path, layerName)
 		}
 
+		// Apply type conversion if needed
+		value := pv.value
+		if m := s.schema.Trie.Lookup(pv.path); m != nil && m.FieldType != nil && value != nil {
+			valueType := reflect.TypeOf(value)
+			if valueType != m.FieldType {
+				converted, err := s.valueConverter(pv.path, value, m.FieldType)
+				if err != nil {
+					var zero T
+					return zero, nil, fmt.Errorf("failed to convert value at path %q: %w", pv.path, err)
+				}
+				value = converted
+			}
+		}
+
 		// Set the value
-		result := jsonptr.SetPath(entry.data, pv.path, pv.value)
+		result := jsonptr.SetPath(entry.data, pv.path, value)
 		if !result.Success {
 			var zero T
 			return zero, nil, fmt.Errorf("failed to set value at path %q", pv.path)
@@ -967,11 +1032,11 @@ func (s *Store[T]) setLocked(layerName layer.Name, opts []SetOption) (T, []subsc
 			op = document.PatchOpReplace
 		}
 
-		// Record the change
+		// Record the change (use converted value)
 		entry.changeset = append(entry.changeset, document.JSONPatch{
 			Op:    op,
 			Path:  pv.path,
-			Value: pv.value,
+			Value: value,
 		})
 
 		entry.dirty = true
