@@ -1347,10 +1347,10 @@ func TestStore_SaveLayer_ErrorPaths(t *testing.T) {
 			store.mu.Lock()
 			defer store.mu.Unlock()
 			entry := store.findLayerLocked("nosave")
-			entry.dirty = true
 			entry.changeset = document.JSONPatchSet{
 				{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
 			}
+			store.syncLayerDirty(entry)
 		}()
 
 		if err := store.SaveLayer(ctx, "nosave"); err == nil {
@@ -1372,10 +1372,10 @@ func TestStore_SaveLayer_ErrorPaths(t *testing.T) {
 			store.mu.Lock()
 			defer store.mu.Unlock()
 			entry := store.findLayerLocked("ro")
-			entry.dirty = true
 			entry.changeset = document.JSONPatchSet{
 				{Op: document.PatchOpReplace, Path: "/host", Value: "h2"},
 			}
+			store.syncLayerDirty(entry)
 		}()
 
 		if err := store.SaveLayer(ctx, "ro"); err == nil {
@@ -1428,7 +1428,7 @@ func TestStore_Reload_ReappliesRemovePatch(t *testing.T) {
 		entry.changeset = []document.JSONPatch{
 			{Op: document.PatchOpRemove, Path: "/host"},
 		}
-		entry.dirty = true
+		store.syncLayerDirty(entry)
 	}()
 
 	if err := store.Reload(ctx); err != nil {

@@ -36,6 +36,9 @@ type MapDecoder = decoder.Func
 
 // PathMapping represents a single field's path mapping from a jubako struct tag.
 type PathMapping struct {
+	// Path is the schema path for this field.
+	// It may include wildcard segments for map keys and slice indices.
+	Path string
 	// FieldKey is the JSON key used for decoding (from json tag or field name).
 	FieldKey string
 	// SourcePath is the JSONPointer path to retrieve the value from (from jubako tag).
@@ -53,6 +56,8 @@ type PathMapping struct {
 	// FieldType is the reflect.Type of the struct field.
 	// Used for type conversion when setting values via SetTo.
 	FieldType reflect.Type
+	// StructField is the original reflected struct field metadata.
+	StructField reflect.StructField
 }
 
 // HasDirective returns true if this mapping has any jubako tag directives.
@@ -131,12 +136,13 @@ func buildMappingTableRecursive(t reflect.Type, delimiter string, fieldTagName s
 		// Create PathMapping for all fields to support type conversion in SetTo.
 		// Even fields without jubako tags need type info for proper conversion.
 		m := &PathMapping{
-			FieldKey:   tagInfo.FieldKey,
-			SourcePath: tagInfo.Path,
-			IsRelative: tagInfo.IsRelative,
-			Sensitive:  tagInfo.Sensitive,
-			Skipped:    tagInfo.Skipped,
-			FieldType:  field.Type,
+			FieldKey:    tagInfo.FieldKey,
+			SourcePath:  tagInfo.Path,
+			IsRelative:  tagInfo.IsRelative,
+			Sensitive:   tagInfo.Sensitive,
+			Skipped:     tagInfo.Skipped,
+			FieldType:   field.Type,
+			StructField: field,
 		}
 		table.Mappings = append(table.Mappings, m)
 
@@ -365,4 +371,3 @@ func applyMappingsWithRoot(root, src map[string]any, table *MappingTable, pathPr
 
 	return dst
 }
-

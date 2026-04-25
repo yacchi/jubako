@@ -22,6 +22,9 @@ type Schema struct {
 	// Trie provides path-based lookup for field attributes.
 	// Built from Table, indexed by source paths (JSONPointer format).
 	Trie *MappingTrie
+
+	// Mappings contains all known path mappings in declaration order.
+	Mappings []*PathMapping
 }
 
 // NewSchema creates a Schema from a MappingTable.
@@ -33,8 +36,9 @@ func NewSchema(table *MappingTable) *Schema {
 		return &Schema{}
 	}
 	return &Schema{
-		Table: table,
-		Trie:  NewMappingTrie(table),
+		Table:    table,
+		Trie:     NewMappingTrie(table),
+		Mappings: collectMappings(table),
 	}
 }
 
@@ -91,8 +95,8 @@ type MappingTrie struct {
 // mappingTrieNode represents a node in the mapping trie.
 type mappingTrieNode struct {
 	children map[string]*mappingTrieNode
-	wildcard *mappingTrieNode  // child for wildcard matching (*)
-	mapping  *PathMapping      // non-nil if this node represents a mapped field
+	wildcard *mappingTrieNode // child for wildcard matching (*)
+	mapping  *PathMapping     // non-nil if this node represents a mapped field
 }
 
 // newMappingTrieNode creates a new trie node.
@@ -145,6 +149,7 @@ func (t *MappingTrie) buildFromTable(table *MappingTable, prefix string) {
 			// No source path remapping: use structural path
 			path = prefix + "/" + m.FieldKey
 		}
+		m.Path = path
 		t.insert(path, m)
 	}
 
@@ -167,6 +172,32 @@ func (t *MappingTrie) buildFromTable(table *MappingTable, prefix string) {
 		valuePrefix := prefix + "/" + key + "/*"
 		t.buildFromTable(valueTable, valuePrefix)
 	}
+}
+
+func collectMappings(table *MappingTable) []*PathMapping {
+	if table == nil {
+		return nil
+	}
+
+	var mappings []*PathMapping
+	var walk func(*MappingTable)
+	walk = func(current *MappingTable) {
+		if current == nil {
+			return
+		}
+		mappings = append(mappings, current.Mappings...)
+		for _, nested := range current.Nested {
+			walk(nested)
+		}
+		for _, nested := range current.SliceElement {
+			walk(nested)
+		}
+		for _, nested := range current.MapValue {
+			walk(nested)
+		}
+	}
+	walk(table)
+	return mappings
 }
 
 // insert adds a path with its mapping to the trie.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/yacchi/jubako/container"
 	"github.com/yacchi/jubako/layer"
 	"github.com/yacchi/jubako/watcher"
 )
@@ -225,13 +226,16 @@ func (s *Store[T]) applyUpdates(ctx context.Context, updates map[layer.Name]laye
 	// Update layer data from watchers
 	for _, update := range updates {
 		update.entry.data = update.result.Data
+		update.entry.loadedData = container.DeepCopyMap(update.result.Data)
 		// Clear changeset as we have fresh data
 		update.entry.changeset = nil
-		update.entry.dirty = false
+		update.entry.dependencies = nil
+		update.entry.projectionDirty = nil
+		s.syncLayerDirty(update.entry)
 	}
 
 	// Re-materialize the configuration
-	current, subscribers, err := s.materializeLocked()
+	current, subscribers, err := s.materializeLocked(ctx)
 	s.mu.Unlock()
 
 	if err != nil {

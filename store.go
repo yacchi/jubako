@@ -165,14 +165,24 @@ type layerEntry struct {
 	// optional indicates whether the layer source is optional (missing source is not an error)
 	optional bool
 
-	// dirty indicates whether the layer has been modified but not yet saved
+	// dirty is the aggregated pending-save state derived from changeset and
+	// projectionDirty via syncLayerDirty.
 	dirty bool
 
 	// data holds the cached data from Load()
 	data map[string]any
 
+	// loadedData holds the last loaded/saved state before in-memory modifications.
+	loadedData map[string]any
+
 	// changeset holds modifications since last Load/Save (for comment preservation)
 	changeset document.JSONPatchSet
+
+	// dependencies declared during stabilization.
+	dependencies []string
+
+	// projectionDirty tracks stable subtrees that need reprojection on next save.
+	projectionDirty []string
 }
 
 // Name returns the unique identifier for this layer.
@@ -519,6 +529,12 @@ func (s *Store[T]) SchemaType() reflect.Type {
 	return reflect.TypeOf(zero)
 }
 
+// SchemaView returns a read-only schema view for the Store.
+// This implements layer.StoreProvider.
+func (s *Store[T]) SchemaView() layer.SchemaView {
+	return newStoreSchemaView(s.schema)
+}
+
 // TagDelimiter returns the delimiter used in jubako struct tags.
 // This implements layer.StoreProvider.
 func (s *Store[T]) TagDelimiter() string {
@@ -691,8 +707,11 @@ func (s *Store[T]) loadLocked(ctx context.Context) (T, []subscriber[T], error) {
 			// For optional layers, treat source.ErrNotExist as empty data
 			if entry.optional && errors.Is(err, source.ErrNotExist) {
 				entry.data = make(map[string]any)
+				entry.loadedData = make(map[string]any)
 				entry.changeset = nil
-				entry.dirty = false
+				entry.dependencies = nil
+				entry.projectionDirty = nil
+				s.syncLayerDirty(entry)
 				continue
 			}
 			var zero T
@@ -700,14 +719,16 @@ func (s *Store[T]) loadLocked(ctx context.Context) (T, []subscriber[T], error) {
 		}
 		// Store the loaded data in the entry
 		entry.data = data
+		entry.loadedData = container.DeepCopyMap(data)
 		// Clear changeset as we have fresh data
 		entry.changeset = nil
-		// Clear dirty flag
-		entry.dirty = false
+		entry.dependencies = nil
+		entry.projectionDirty = nil
+		s.syncLayerDirty(entry)
 	}
 
 	// Materialize the merged configuration
-	return s.materializeLocked()
+	return s.materializeLocked(ctx)
 }
 
 // Reload reloads all layers and re-materializes the configuration.
@@ -753,6 +774,7 @@ func (s *Store[T]) reloadLocked(ctx context.Context) (T, []subscriber[T], error)
 			// For optional layers, treat source.ErrNotExist as empty data
 			if entry.optional && errors.Is(err, source.ErrNotExist) {
 				entry.data = make(map[string]any)
+				entry.loadedData = make(map[string]any)
 				continue
 			}
 			var zero T
@@ -760,6 +782,7 @@ func (s *Store[T]) reloadLocked(ctx context.Context) (T, []subscriber[T], error)
 		}
 		// Store the loaded data in the entry
 		entry.data = data
+		entry.loadedData = container.DeepCopyMap(data)
 	}
 
 	// Reapply saved changesets
@@ -767,7 +790,9 @@ func (s *Store[T]) reloadLocked(ctx context.Context) (T, []subscriber[T], error)
 		changeset, exists := savedChangesets[entry.layer.Name()]
 		if !exists {
 			entry.changeset = nil
-			entry.dirty = false
+			entry.dependencies = nil
+			entry.projectionDirty = nil
+			s.syncLayerDirty(entry)
 			continue
 		}
 
@@ -781,13 +806,13 @@ func (s *Store[T]) reloadLocked(ctx context.Context) (T, []subscriber[T], error)
 			}
 		}
 
-		// Restore the changeset and dirty flag
+		// Restore the changeset and recompute the aggregated dirty state.
 		entry.changeset = changeset
-		entry.dirty = true
+		s.syncLayerDirty(entry)
 	}
 
 	// Materialize the merged configuration
-	return s.materializeLocked()
+	return s.materializeLocked(ctx)
 }
 
 // SetTo sets a value in a specific layer at the given JSONPointer path.
@@ -911,7 +936,6 @@ func (s *Store[T]) setLocked(layerName layer.Name, opts []SetOption) (T, []subsc
 					Op:   document.PatchOpRemove,
 					Path: pv.path,
 				})
-				entry.dirty = true
 			}
 			continue
 		}
@@ -957,12 +981,12 @@ func (s *Store[T]) setLocked(layerName layer.Name, opts []SetOption) (T, []subsc
 			Path:  pv.path,
 			Value: value,
 		})
-
-		entry.dirty = true
 	}
 
+	s.syncLayerDirty(entry)
+
 	// Re-materialize to update the resolved config
-	return s.materializeLocked()
+	return s.materializeLocked(context.Background())
 }
 
 // DeleteFrom removes values at the specified JSON Pointer paths from a specific layer.
@@ -1053,10 +1077,10 @@ func (s *Store[T]) deleteFromLocked(layerName layer.Name, paths []string) (T, []
 	}
 
 	// Mark the layer as dirty
-	entry.dirty = true
+	s.syncLayerDirty(entry)
 
 	// Re-materialize to update the resolved config
-	return s.materializeLocked()
+	return s.materializeLocked(context.Background())
 }
 
 // Save persists all modified (dirty) layers to their sources.
@@ -1126,10 +1150,7 @@ func (s *Store[T]) saveLayerLocked(ctx context.Context, entry *layerEntry) error
 		return fmt.Errorf("layer %q has not been loaded", entry.layer.Name())
 	}
 
-	// Avoid rewriting unchanged documents.
-	// This is important for comment-preserving formats where "save without changes"
-	// could still re-serialize and lose formatting/comments depending on the Document.
-	if !entry.dirty || entry.changeset.IsEmpty() {
+	if !entry.dirty {
 		return nil
 	}
 
@@ -1141,13 +1162,31 @@ func (s *Store[T]) saveLayerLocked(ctx context.Context, entry *layerEntry) error
 		return fmt.Errorf("layer %q does not support saving", entry.layer.Name())
 	}
 
-	if err := entry.layer.Save(ctx, entry.changeset); err != nil {
-		return fmt.Errorf("failed to save layer %q: %w", entry.layer.Name(), err)
+	changeset := normalizeSavePatches(entry.changeset, entry.projectionDirty, entry.data)
+
+	if saver, ok := entry.layer.(layer.ContextualSaveLayer); ok {
+		saveCtx := s.newLayerSaveContext(entry)
+		if err := saver.SaveWithContext(ctx, saveCtx, changeset); err != nil {
+			return fmt.Errorf("failed to save layer %q: %w", entry.layer.Name(), err)
+		}
+	} else {
+		// Avoid rewriting unchanged documents for ordinary layers.
+		// This is important for comment-preserving formats where "save without changes"
+		// could still re-serialize and lose formatting/comments depending on the Document.
+		if changeset.IsEmpty() {
+			return nil
+		}
+		if err := entry.layer.Save(ctx, changeset); err != nil {
+			return fmt.Errorf("failed to save layer %q: %w", entry.layer.Name(), err)
+		}
 	}
 
 	// Clear dirty flag and changeset on successful save
-	entry.dirty = false
+	entry.loadedData = container.DeepCopyMap(entry.data)
 	entry.changeset = nil
+	entry.dependencies = nil
+	entry.projectionDirty = nil
+	s.syncLayerDirty(entry)
 
 	return nil
 }

@@ -1,10 +1,14 @@
 package jubako
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/yacchi/jubako/container"
 	"github.com/yacchi/jubako/jsonptr"
+	"github.com/yacchi/jubako/layer"
 )
 
 // materialize merges all layers into the resolved configuration value.
@@ -17,10 +21,7 @@ import (
 // 3. Unmarshal the merged map into the configuration type T
 // 4. Update the resolved Cell with the new value
 // 5. Notify all subscribers
-func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
-	// Clear existing origins
-	s.origins.clear()
-
+func (s *Store[T]) materializeLocked(ctx context.Context) (T, []subscriber[T], error) {
 	if len(s.layers) == 0 {
 		// No layers - use zero value
 		var zero T
@@ -29,19 +30,22 @@ func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
 		return zero, subscribers, nil
 	}
 
-	// Merge all layers into a single map, tracking origins
-	// Layers are already sorted by priority (lowest first)
-	merged := make(map[string]any)
+	if err := s.stabilizeLayersLocked(ctx); err != nil {
+		var zero T
+		return zero, nil, err
+	}
+
+	merged := s.mergeLayerDataLocked(func(entry *layerEntry) map[string]any {
+		return entry.data
+	})
+
+	// Clear existing origins after stabilization settles.
+	s.origins.clear()
 	for _, entry := range s.layers {
 		if entry.data == nil {
-			continue // Skip layers that haven't been loaded
+			continue
 		}
-
-		// Walk the map to track origins for all paths
 		walkMapForOrigins("", entry.data, entry, s.origins)
-
-		// Deep merge the layer map into merged
-		deepMerge(merged, entry.data)
 	}
 
 	// Convert merged map to type T
@@ -60,6 +64,106 @@ func (s *Store[T]) materializeLocked() (T, []subscriber[T], error) {
 	s.resolved.Set(result)
 	subscribers := append([]subscriber[T](nil), s.subscribers...)
 	return result, subscribers, nil
+}
+
+const maxStabilizationPasses = 8
+
+func (s *Store[T]) stabilizeLayersLocked(ctx context.Context) error {
+	seen := make(map[string]struct{})
+
+	for pass := 0; pass < maxStabilizationPasses; pass++ {
+		state, err := s.stabilizationFingerprintLocked()
+		if err != nil {
+			return err
+		}
+		if _, ok := seen[state]; ok {
+			return fmt.Errorf("stabilization did not converge: detected oscillation")
+		}
+		seen[state] = struct{}{}
+
+		snapshot := s.mergeLayerDataLocked(func(entry *layerEntry) map[string]any {
+			return entry.data
+		})
+		schemaView := newStoreSchemaView(s.schema)
+
+		changed := false
+		for _, entry := range s.layers {
+			stabilizer, ok := entry.layer.(layer.SnapshotAwareLayer)
+			if !ok {
+				entry.dependencies = nil
+				entry.projectionDirty = nil
+				s.syncLayerDirty(entry)
+				continue
+			}
+
+			result, err := stabilizer.Stabilize(ctx, storeStabilizeContext{
+				snapshot: snapshot,
+				schema:   schemaView,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to stabilize layer %q: %w", entry.layer.Name(), err)
+			}
+
+			entry.dependencies = nil
+			entry.projectionDirty = nil
+			if result != nil {
+				entry.dependencies = append(entry.dependencies, result.Dependencies...)
+				entry.projectionDirty = normalizeProjectionDirty(result.ProjectionDirty)
+				switch {
+				case result.Data != nil && (result.Changed || !reflect.DeepEqual(entry.data, result.Data)):
+					entry.data = container.DeepCopyMap(result.Data)
+					changed = true
+				case result.Changed:
+					changed = true
+				}
+			}
+			s.syncLayerDirty(entry)
+		}
+
+		if !changed {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("stabilization did not converge after %d passes", maxStabilizationPasses)
+}
+
+func (s *Store[T]) stabilizationFingerprintLocked() (string, error) {
+	type layerState struct {
+		Name            string         `json:"name"`
+		Data            map[string]any `json:"data,omitempty"`
+		Dependencies    []string       `json:"dependencies,omitempty"`
+		ProjectionDirty []string       `json:"projection_dirty,omitempty"`
+	}
+
+	state := make([]layerState, 0, len(s.layers))
+	for _, entry := range s.layers {
+		state = append(state, layerState{
+			Name:            string(entry.layer.Name()),
+			Data:            entry.data,
+			Dependencies:    entry.dependencies,
+			ProjectionDirty: entry.projectionDirty,
+		})
+	}
+
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("marshal stabilization state: %w", err)
+	}
+	return string(raw), nil
+}
+
+type storeStabilizeContext struct {
+	snapshot map[string]any
+	schema   layer.SchemaView
+}
+
+func (c storeStabilizeContext) Snapshot() map[string]any {
+	return container.DeepCopyMap(c.snapshot)
+}
+
+func (c storeStabilizeContext) Schema() layer.SchemaView {
+	return c.schema
 }
 
 // mergeValues merges two values and returns the result.
@@ -145,4 +249,3 @@ func walkSliceForOrigins(prefix string, data []any, entry *layerEntry, o *origin
 		}
 	}
 }
-

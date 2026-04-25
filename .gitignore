@@ -12,6 +12,7 @@
 # Output of go coverage
 *.out
 coverage.html
+coverage_convert.html
 
 # Go workspace
 go.work

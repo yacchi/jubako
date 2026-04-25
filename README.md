@@ -6,10 +6,19 @@
 
 **Jubako** (重箱) is a layered configuration management library for Go.
 
+Jubako is built for applications that need more than "load everything into one merged map". It keeps layers visible,
+tracks where resolved values came from, writes back to the right layer, and preserves comments and formatting for
+supported document formats.
+
+It is especially useful for CLIs and applications that both read and edit configuration, need hot reload, or need to
+coordinate one logical configuration view across multiple physical stores.
+
 The name comes from traditional Japanese stacked boxes used for special occasions. Each layer (tier) contains different
 items, and together they form a complete set - much like how this library manages configuration from multiple sources.
 
 [日本語版 README](README_ja.md)
+
+Design docs: [docs/design/README.md](docs/design/README.md) / [docs/design/README_ja.md](docs/design/README_ja.md)
 
 ## Table of Contents
 
@@ -41,13 +50,14 @@ items, and together they form a complete set - much like how this library manage
 
 ## Features
 
-- **Layer-aware configuration** - Manage multiple config sources with priority ordering
-- **Origin tracking** - Track which layer each configuration value comes from
-- **Format preservation** - AST-based processing updates only changed values (preserves comments, whitespace,
-  indentation, etc.)
-- **Type-safe access** - Generics-based API with compile-time type checking
-- **Change notifications** - Subscribe to configuration changes
-- **Hot reload** - Automatically reload configuration when sources change (`Store.Watch`)
+- **Layer-aware by design** - Keep per-layer data instead of flattening everything into one irreversible result
+- **Origin-aware access** - Ask which layer produced the effective value at a path
+- **Layer-aware write-back** - Update a specific layer and save only pending changes
+- **Format-preserving edits** - Patch supported YAML, TOML, and JSONC documents without rewriting the whole file
+- **Type-safe resolved config** - Decode the effective result into a typed `Store[T]`
+- **Hot reload with subscriptions** - Reload from watched sources and notify subscribers of resolved changes
+- **Logical-to-physical coordination** - Build one logical layer from multiple backing stores such as metadata files
+  and external secret stores
 
 ## Installation
 
@@ -163,6 +173,7 @@ func main() {
 For complete working examples, see the [examples/](examples/) directory:
 
 - [basic](examples/basic/) - Basic usage (adding layers, loading, modifying, saving)
+- [coordinated-layer](examples/coordinated-layer/) - One logical layer backed by metadata + external secret storage
 - [env-override](examples/env-override/) - Environment variable overrides
 - [origin-tracking](examples/origin-tracking/) - Detailed origin tracking features
 - [path-remapping](examples/path-remapping/) - Path remapping with jubako struct tags (absolute/relative paths, slice/map support)
@@ -1460,18 +1471,24 @@ See the following packages for existing implementations:
 
 ## Comparison with Typical Config Libraries
 
-| Feature                | Jubako                                              | Typical Libraries                   |
-|------------------------|-----------------------------------------------------|-------------------------------------|
-| Layer tracking         | Per-layer preservation                              | Merged (irreversible)               |
-| Origin tracking        | Yes                                                 | No                                  |
-| Write support          | Layer-aware write-back                              | Limited                             |
-| Format preservation    | Yes (AST-based, supported formats)                  | No                                  |
-| Change notifications   | Built-in `Subscribe` + `Watch` (debounce supported)  | Often manual or coarse              |
-| Path-based read/write  | JSON Pointer API (`GetAt`, `SetTo`)                 | Ad-hoc key strings                  |
-| Dirty tracking         | Per-layer dirty + store-level `IsDirty()`           | Usually none                        |
-| Safe writes            | Patch-based updates + optimistic locking            | Full rewrite, last-writer-wins      |
-| Layer controls         | Per-layer read-only and watch disable options       | Rare                                |
-| Extensibility          | Pluggable `Source` / `Document` / `Layer` interfaces| Often format/source-specific        |
+Many configuration libraries do an excellent job of loading and merging settings from files, env vars, flags, or
+remote sources. Jubako is aimed at a slightly different problem shape: configuration that must stay layered,
+inspectable, and writable after load.
+
+| Area | Jubako focus | Common focus in other libraries |
+|------|--------------|---------------------------------|
+| Effective config | Keep both the resolved view and per-layer data | Expose the merged effective view |
+| Debuggability | Track origin metadata for resolved values | Emphasis often stays on final values |
+| Editing | Update a chosen layer and save only dirty changes | Many libraries primarily optimize for loading and unmarshalling |
+| File preservation | Patch supported formats while keeping comments and layout | Rewrite or regeneration strategies are more common |
+| Runtime updates | Built-in `Subscribe` and `Watch` around the resolved store | Reload support varies by library |
+| Path operations | JSON Pointer-based `GetAt`, `SetTo`, `DeleteFrom`, and `Walk` | Access patterns often center on key strings or struct unmarshalling |
+| External coordination | Support logical layers reconstructed from multiple backing stores | Cross-store coordination is often left to application code |
+| Extension seams | Separate `Source`, `Document`, and `Layer` abstractions | Extension points vary by library and ecosystem |
+
+If you mainly need straightforward loading into structs, many established libraries may already be a good fit. Jubako
+becomes more compelling when you need provenance, safe write-back, format preservation, or coordinated multi-store
+configuration behavior.
 
 ## License
 

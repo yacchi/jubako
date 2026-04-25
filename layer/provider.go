@@ -22,6 +22,10 @@ type StoreProvider interface {
 	// Used by layers like env to build schema mappings from struct tags.
 	SchemaType() reflect.Type
 
+	// SchemaView returns a read-only schema view for the Store's configuration.
+	// Layers can use this to inspect path metadata and user-defined struct tags.
+	SchemaView() SchemaView
+
 	// TagDelimiter returns the delimiter used to separate path and directives
 	// in jubako struct tags (default: ",").
 	TagDelimiter() string
