@@ -133,7 +133,11 @@ func example1AbsolutePaths(ctx context.Context) {
 	store := jubako.New[ServerConfig]()
 
 	fmt.Println("\nMapping Table:")
-	fmt.Println(store.MappingTable())
+	if schema := store.Schema(); schema != nil && schema.Table != nil {
+		fmt.Println(schema.Table)
+	} else {
+		fmt.Println("(no mappings)")
+	}
 
 	if err := store.Add(mapdata.New("config", configData)); err != nil {
 		log.Fatal(err)
@@ -178,7 +182,11 @@ func example2SliceRelativePaths(ctx context.Context) {
 	store := jubako.New[ClusterConfig]()
 
 	fmt.Println("\nMapping Table:")
-	fmt.Println(store.MappingTable())
+	if schema := store.Schema(); schema != nil && schema.Table != nil {
+		fmt.Println(schema.Table)
+	} else {
+		fmt.Println("(no mappings)")
+	}
 
 	if err := store.Add(mapdata.New("config", configData)); err != nil {
 		log.Fatal(err)
@@ -222,7 +230,11 @@ func example3MapRelativePaths(ctx context.Context) {
 	store := jubako.New[AppConfig]()
 
 	fmt.Println("\nMapping Table:")
-	fmt.Println(store.MappingTable())
+	if schema := store.Schema(); schema != nil && schema.Table != nil {
+		fmt.Println(schema.Table)
+	} else {
+		fmt.Println("(no mappings)")
+	}
 
 	if err := store.Add(mapdata.New("config", configData)); err != nil {
 		log.Fatal(err)

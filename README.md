@@ -591,7 +591,9 @@ func main() {
 
 	// Check if struct has any jubako mappings
 	if store.HasMappings() {
-		fmt.Println(store.MappingTable())
+		if schema := store.Schema(); schema != nil && schema.Table != nil {
+			fmt.Println(schema.Table)
+		}
 	}
 }
 

@@ -553,7 +553,9 @@ store := jubako.New[ClusterConfig]()
 
 // jubako マッピングがあるか確認
 if store.HasMappings() {
-	fmt.Println(store.MappingTable())
+	if schema := store.Schema(); schema != nil && schema.Table != nil {
+		fmt.Println(schema.Table)
+	}
 }
 
 // 出力:
