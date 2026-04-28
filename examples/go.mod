@@ -6,8 +6,8 @@ toolchain go1.24.10
 
 require (
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/yacchi/jubako v0.5.0
-	github.com/yacchi/jubako/format/yaml v0.5.0
+	github.com/yacchi/jubako v0.6.0
+	github.com/yacchi/jubako/format/yaml v0.6.0
 	github.com/zalando/go-keyring v0.2.8
 )
 
