@@ -302,13 +302,13 @@ ci-release:
 	@echo "CI Release for $(VERSION)..."
 	@if git rev-parse "$(VERSION)" >/dev/null 2>&1; then \
 		echo "Tag $(VERSION) already exists. Skipping release."; \
-		exit 0; \
+	else \
+		$(MAKE) verify-version; \
+		$(MAKE) release-tag; \
+		echo "Pushing tags..."; \
+		git push --tags; \
+		echo "Release $(VERSION) complete!"; \
 	fi
-	@$(MAKE) verify-version
-	@$(MAKE) release-tag
-	@echo "Pushing tags..."
-	@git push --tags
-	@echo "Release $(VERSION) complete!"
 
 help: ## Show help
 	@go run ./scripts/help
