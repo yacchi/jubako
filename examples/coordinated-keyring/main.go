@@ -4,6 +4,9 @@
 // keyring adapter. The metadata layer remains in-memory for brevity, while the
 // access token is migrated into the keyring and updated there on later saves.
 //
+// If the OS keyring is unavailable (for example in headless CI), the example
+// falls back to an in-memory secret store so it still compiles and runs.
+//
 // The example derives the initial ref from user_id@space_id so the stored key is
 // readable in keyring UIs. ExternalKey is omitted, so the helper uses Ref as the
 // backend key. After the first save, ExistingRef keeps that value stable to avoid
@@ -27,7 +30,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	secretStore := newKeyringStore(keyringService)
+	secretStore, backendName := newExampleSecretStore()
 	const cleanupKey = "example-user@example-space"
 	defer func() {
 		_ = secretStore.Delete(ctx, externalstore.ExternalContext[*Credential]{
@@ -108,6 +111,7 @@ func main() {
 	}
 
 	fmt.Println("=== Coordinated Keyring Example ===")
+	fmt.Printf("Backend: %s\n", backendName)
 	fmt.Printf("Dirty after load: %v\n", store.IsDirty())
 	fmt.Printf("Logical credential (masked): %v\n", store.GetAt("/credential/default/access_token").Value)
 	fmt.Printf("Logical credential (unmasked): %v\n", store.GetAtUnmasked("/credential/default/access_token").Value)
@@ -133,4 +137,12 @@ func main() {
 	fmt.Println("After logical update + save:")
 	fmt.Printf("Metadata: %#v\n", metadata.Data())
 	fmt.Printf("Logical credential (unmasked): %v\n", store.GetAtUnmasked("/credential/default/access_token").Value)
+}
+
+func newExampleSecretStore() (externalstore.SecretStore[*Credential], string) {
+	store := newKeyringStore(keyringService)
+	if err := store.Available(); err == nil {
+		return store, "os-keyring"
+	}
+	return newMemorySecretStore(), "in-memory fallback"
 }
