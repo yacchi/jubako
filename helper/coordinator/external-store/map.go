@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -503,8 +502,11 @@ func (c *mapCoordinator[T]) hydrateTaggedFields(
 		if !ok {
 			continue
 		}
-		current, exists := jsonptr.GetPath(entry, rel)
-		if exists && reflect.DeepEqual(current, value) {
+		// Preserve any existing value on entry. The in-memory state may carry
+		// pending modifications (e.g., set via Store.Set just before Save) that
+		// must not be reverted by hydrating from the external store snapshot.
+		// Hydration only fills in missing fields.
+		if _, exists := jsonptr.GetPath(entry, rel); exists {
 			continue
 		}
 		if result := jsonptr.SetPath(entry, rel, value); !result.Success {
