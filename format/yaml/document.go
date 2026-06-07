@@ -119,6 +119,8 @@ func (d *Document) Apply(data []byte, changeset document.JSONPatchSet) ([]byte, 
 		}
 	}
 
+	clearFlowStyle(root)
+
 	return d.marshal(root)
 }
 
@@ -347,42 +349,49 @@ func updateNodeValue(node *yaml.Node, value any) {
 	switch v := value.(type) {
 	case string:
 		node.Kind = yaml.ScalarNode
+		node.Style = 0
 		node.Tag = "!!str"
 		node.Value = v
 		node.Content = nil
 
 	case int:
 		node.Kind = yaml.ScalarNode
+		node.Style = 0
 		node.Tag = "!!int"
 		node.Value = strconv.Itoa(v)
 		node.Content = nil
 
 	case int64:
 		node.Kind = yaml.ScalarNode
+		node.Style = 0
 		node.Tag = "!!int"
 		node.Value = strconv.FormatInt(v, 10)
 		node.Content = nil
 
 	case float64:
 		node.Kind = yaml.ScalarNode
+		node.Style = 0
 		node.Tag = "!!float"
 		node.Value = strconv.FormatFloat(v, 'f', -1, 64)
 		node.Content = nil
 
 	case bool:
 		node.Kind = yaml.ScalarNode
+		node.Style = 0
 		node.Tag = "!!bool"
 		node.Value = strconv.FormatBool(v)
 		node.Content = nil
 
 	case nil:
 		node.Kind = yaml.ScalarNode
+		node.Style = 0
 		node.Tag = "!!null"
 		node.Value = ""
 		node.Content = nil
 
 	case []any:
 		node.Kind = yaml.SequenceNode
+		node.Style = 0
 		node.Tag = ""
 		node.Value = ""
 		node.Content = make([]*yaml.Node, len(v))
@@ -392,6 +401,7 @@ func updateNodeValue(node *yaml.Node, value any) {
 
 	case map[string]any:
 		node.Kind = yaml.MappingNode
+		node.Style = 0
 		node.Tag = ""
 		node.Value = ""
 		node.Content = make([]*yaml.Node, 0, len(v)*2)
@@ -418,6 +428,23 @@ func valueToNode(value any) *yaml.Node {
 	node := &yaml.Node{}
 	updateNodeValue(node, value)
 	return node
+}
+
+// clearFlowStyle recursively resets FlowStyle on mapping and sequence nodes
+// so the YAML encoder always produces block-style output.
+func clearFlowStyle(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.MappingNode || node.Kind == yaml.SequenceNode {
+		node.Style &^= yaml.FlowStyle
+	}
+	for _, child := range node.Content {
+		clearFlowStyle(child)
+	}
+	if node.Kind == yaml.AliasNode && node.Alias != nil {
+		clearFlowStyle(node.Alias)
+	}
 }
 
 // nodeKindString returns a human-readable string for a node kind.
